@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Self-hosted browser UI for OpenAI Codex (via MCP), with OTP/TOTP auth, resumable chat sessions, interactive browser terminal, and one-command deployment. Search tags: `codex`, `remote`, `web chat`, `terminal`, `otp`, `totp`, `nginx`, `systemd`, `nodejs`.
+Self-hosted browser UI for OpenAI Codex (via MCP), with TOTP auth, resumable chat sessions, interactive browser terminal, and one-command deployment. Search tags: `codex`, `remote`, `web chat`, `terminal`, `totp`, `nginx`, `systemd`, `nodejs`.
 
 This project is a small Node.js + React frontend/backend app that exposes Codex as a web service. It is designed for remote access from another machine (internet or LAN) and includes path-based proxy support under `/codex`.
 
@@ -10,7 +10,7 @@ This project is a small Node.js + React frontend/backend app that exposes Codex 
 
 - Web chat UI for Codex sessions
 - Streaming assistant responses with auto-reconnect
-- OTP login (console OTP) and optional TOTP login
+- TOTP login with first-login QR setup
 - Persistent sessions/chats via `DATA_DIR` (default: `data`)
 - `/status` command support with usage/rate-limit status
 - `/web help` in chat for web-only commands
@@ -60,12 +60,6 @@ If you can’t access from another machine, open inbound TCP `18888` in firewall
 
 ## Auth
 
-### OTP
-
-- On login page click `Request OTP`
-- Read 6-digit code from server log
-- Enter code and verify
-
 ### TOTP (recommended for persistent remote devices)
 
 1. Configure:
@@ -77,16 +71,13 @@ node -e "const { authenticator } = require('otplib'); console.log(authenticator.
 
 2. Set env:
 
-- `AUTH_MODE=totp`
 - `TOTP_SECRET=<your secret>`
-- `PRINT_TOTP_QR=true`
+- `PRINT_TOTP_QR=true` (optional: print QR in server logs)
 
-3. Restart and scan QR (if exposed via login UI)
+3. Restart and open login page:
 
-Optional:
-
-- `EXPOSE_TOTP_URI=true` enables QR modal in web login
-- `EXPOSE_TOTP_URI=false` keeps QR hidden (recommended for internet exposure)
+- On first login, the web UI fetches and shows TOTP QR automatically
+- After first successful TOTP login, QR is no longer retrievable
 
 ## CLI-like Web Commands
 
@@ -98,7 +89,7 @@ Optional:
 ### Credential login
 
 - Create credential tokens via API (`POST /api/auth/credential`) after normal login.
-- Use credential token to create a fresh session (`POST /api/auth/credential/login`) without OTP/TOTP.
+- Use credential token to create a fresh session (`POST /api/auth/credential/login`).
 - List and revoke credentials via `GET /api/auth/credentials` and `POST /api/auth/credential/revoke`.
 - Store credentials securely; the token is shown once when created and cannot be read again later.
 
@@ -216,8 +207,6 @@ CODEREMOTEAPP_LOG=/path/to/log npm run restart
 - `POST /api/chats/:id/abort`
 - `POST /api/terminal`
 - `GET /api/terminals`
-- `POST /api/auth/otp/request`
-- `POST /api/auth/otp/verify`
 - `POST /api/auth/totp/verify`
 - `POST /api/auth/credential/login`
 - `POST /api/auth/credential`

@@ -24,9 +24,6 @@ const env = readEnv();
 
 const store = new MemoryStore({
   sessionTtlMs: env.SESSION_TTL_MS,
-  otpTtlMs: env.OTP_TTL_MS,
-  maxOtpAttempts: 5,
-  otpLockMs: 15 * 60 * 1000,
   persistencePath: path.resolve(process.cwd(), env.DATA_DIR, 'store.json')
 });
 
@@ -1117,29 +1114,20 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/auth/mode', (_req, res) => {
-  res.json({ ok: true, mode: env.AUTH_MODE });
+  res.json({ ok: true, mode: 'totp' });
 });
 
 app.get('/api/auth/totp/status', (_req, res) => {
-  if (env.AUTH_MODE !== 'totp') {
-    return res.json({ ok: true, enabled: false, provisioned: false });
-  }
-  return res.json({ ok: true, enabled: true, provisioned: isTotpProvisioned() });
+  return res.json({ ok: true, enabled: Boolean(env.TOTP_SECRET), provisioned: isTotpProvisioned() });
 });
 
 app.get('/api/auth/totp/uri', (_req, res) => {
-  if (env.AUTH_MODE !== 'totp') {
-    return res.status(400).json({ ok: false, error: 'wrong_mode' });
-  }
   if (!env.TOTP_SECRET) {
     return res.status(500).json({ ok: false, error: 'totp_not_configured' });
   }
   if (isTotpProvisioned()) {
     // Global one-time QR: once someone successfully logged in, do not allow retrieving URI again.
     return res.status(404).json({ ok: false, error: 'provisioned' });
-  }
-  if (!env.EXPOSE_TOTP_URI) {
-    return res.status(404).json({ ok: false, error: 'disabled' });
   }
 
   const uri = authenticator.keyuri(env.TOTP_ACCOUNT, env.TOTP_ISSUER, env.TOTP_SECRET);
@@ -1432,53 +1420,11 @@ app.post('/api/fs/mkdir', (req, res) => {
   }
 });
 
-app.post('/api/auth/otp/request', (_req, res) => {
-  if (env.AUTH_MODE !== 'otp') {
-    return res.status(400).json({ ok: false, error: 'wrong_mode' });
-  }
-  const { challenge, otp } = store.createOtpChallenge();
-
-  // Intentionally only logs OTP server-side.
-  // In production you'd deliver via email/SMS/etc.
-  // We include challenge id in response.
-  console.log(`[OTP] challenge=${challenge.id} otp=${otp} (expires in ${Math.round(env.OTP_TTL_MS / 1000)}s)`);
-
-  res.json({ ok: true, challengeId: challenge.id, expiresInMs: env.OTP_TTL_MS });
-});
-
-const VerifySchema = z.object({
-  challengeId: z.string().min(1),
-  otp: z.string().regex(/^\d{6}$/)
-});
-
-app.post('/api/auth/otp/verify', (req, res) => {
-  if (env.AUTH_MODE !== 'otp') {
-    return res.status(400).json({ ok: false, error: 'wrong_mode' });
-  }
-  const parsed = VerifySchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: 'bad_request' });
-  }
-
-  const r = store.verifyOtpChallenge(parsed.data.challengeId, parsed.data.otp);
-  if (!r.ok) {
-    return res.status(401).json({ ok: false, error: r.error ?? 'invalid' });
-  }
-
-  const session = store.createSession();
-  setSessionCookie(res, session.id);
-
-  res.json({ ok: true, sessionId: session.id, expiresInMs: env.SESSION_TTL_MS });
-});
-
 const TotpVerifySchema = z.object({
   code: z.string().regex(/^\d{6}$/)
 });
 
 app.post('/api/auth/totp/verify', (req, res) => {
-  if (env.AUTH_MODE !== 'totp') {
-    return res.status(400).json({ ok: false, error: 'wrong_mode' });
-  }
   if (!env.TOTP_SECRET) {
     return res.status(500).json({ ok: false, error: 'totp_not_configured' });
   }
@@ -2072,7 +2018,7 @@ const server = app.listen(port, env.HOST, () => {
   console.log(
     `[server] Sessiond: http://${env.CODEX_SESSIOND_HOST}:${env.CODEX_SESSIOND_PORT} autoStart=${env.CODEX_SESSIOND_AUTO_START}`
   );
-  console.log(`[server] Auth mode: ${env.AUTH_MODE}`);
+  console.log('[server] Auth mode: totp');
   if (port !== env.PORT) {
     console.log(`[server] Note: requested PORT=${env.PORT} was busy; using PORT=${port}`);
   }
@@ -2093,16 +2039,14 @@ const server = app.listen(port, env.HOST, () => {
     }
   }
 
-  if (env.AUTH_MODE === 'totp') {
-    if (!env.TOTP_SECRET) {
-      console.log('[server] TOTP_SECRET is not set; TOTP login will fail.');
-    } else if (env.PRINT_TOTP_QR && !isTotpProvisioned()) {
-      const uri = authenticator.keyuri(env.TOTP_ACCOUNT, env.TOTP_ISSUER, env.TOTP_SECRET);
-      console.log('[server] Scan this TOTP QR with your authenticator app:');
-      qrcode.generate(uri, { small: true });
-    } else if (env.PRINT_TOTP_QR && isTotpProvisioned()) {
-      console.log(`[server] TOTP already provisioned (marker exists at ${totpProvisionPath}); not printing QR.`);
-    }
+  if (!env.TOTP_SECRET) {
+    console.log('[server] TOTP_SECRET is not set; TOTP login will fail.');
+  } else if (env.PRINT_TOTP_QR && !isTotpProvisioned()) {
+    const uri = authenticator.keyuri(env.TOTP_ACCOUNT, env.TOTP_ISSUER, env.TOTP_SECRET);
+    console.log('[server] Scan this TOTP QR with your authenticator app:');
+    qrcode.generate(uri, { small: true });
+  } else if (env.PRINT_TOTP_QR && isTotpProvisioned()) {
+    console.log(`[server] TOTP already provisioned (marker exists at ${totpProvisionPath}); not printing QR.`);
   }
 });
 

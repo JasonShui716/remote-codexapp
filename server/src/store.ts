@@ -12,15 +12,6 @@ export type Session = {
   createdByCredentialId?: string;
 };
 
-export type OtpChallenge = {
-  id: string;
-  createdAt: number;
-  expiresAt: number;
-  otpHash: string;
-  attempts: number;
-  lockedUntil?: number;
-};
-
 export type CredentialRecord = {
   id: string;
   tokenHash: string;
@@ -91,7 +82,6 @@ type PersistedStore = {
 
 export class MemoryStore {
   private sessions = new Map<string, Session>();
-  private otpChallenges = new Map<string, OtpChallenge>();
   private chatsBySession = new Map<string, Map<string, Chat>>();
   private streamsByChatKey = new Map<string, ChatStream>();
   private credentials = new Map<string, CredentialRecord>();
@@ -103,9 +93,6 @@ export class MemoryStore {
 
   constructor(private opts: {
     sessionTtlMs: number;
-    otpTtlMs: number;
-    maxOtpAttempts: number;
-    otpLockMs: number;
     persistencePath?: string;
   }) {
     this.persistencePath = this.opts.persistencePath?.trim();
@@ -120,12 +107,6 @@ export class MemoryStore {
 
   private sha256Hex(s: string): string {
     return crypto.createHash('sha256').update(s).digest('hex');
-  }
-
-  private randOtp6(): string {
-    // 6 digits with leading zeros.
-    const n = crypto.randomInt(0, 1_000_000);
-    return String(n).padStart(6, '0');
   }
 
   private markForPersist() {
@@ -303,10 +284,6 @@ export class MemoryStore {
         this.sessions.delete(id);
         changed = true;
       }
-    }
-
-    for (const [id, ch] of this.otpChallenges) {
-      if (ch.expiresAt <= t) this.otpChallenges.delete(id);
     }
 
     for (const [sid, chats] of this.chatsBySession) {
@@ -551,51 +528,6 @@ export class MemoryStore {
     this.sessions.set(sessionId, s);
     this.markForPersist();
     return true;
-  }
-
-  createOtpChallenge(): { challenge: OtpChallenge; otp: string } {
-    const createdAt = this.now();
-    const otp = this.randOtp6();
-    const id = nanoid(18);
-    const challenge: OtpChallenge = {
-      id,
-      createdAt,
-      expiresAt: createdAt + this.opts.otpTtlMs,
-      otpHash: this.sha256Hex(otp),
-      attempts: 0
-    };
-    this.otpChallenges.set(id, challenge);
-    return { challenge, otp };
-  }
-
-  verifyOtpChallenge(challengeId: string, otp: string): { ok: boolean; error?: string } {
-    const ch = this.otpChallenges.get(challengeId);
-    if (!ch) return { ok: false, error: 'not_found' };
-
-    const t = this.now();
-    if (ch.expiresAt <= t) {
-      this.otpChallenges.delete(challengeId);
-      return { ok: false, error: 'expired' };
-    }
-
-    if (ch.lockedUntil && ch.lockedUntil > t) {
-      return { ok: false, error: 'locked' };
-    }
-
-    ch.attempts += 1;
-
-    const ok = this.sha256Hex(otp) === ch.otpHash;
-    if (ok) {
-      this.otpChallenges.delete(challengeId);
-      return { ok: true };
-    }
-
-    if (ch.attempts >= this.opts.maxOtpAttempts) {
-      ch.lockedUntil = t + this.opts.otpLockMs;
-    }
-
-    this.otpChallenges.set(challengeId, ch);
-    return { ok: false, error: 'invalid' };
   }
 
   private getChatsMapForSession(sessionId: string): Map<string, Chat> {

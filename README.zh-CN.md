@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-这是一个自托管的 OpenAI Codex（通过 MCP）Web 界面，支持 OTP/TOTP 登录、可恢复会话、浏览器交互式 Terminal，以及一键部署。
+这是一个自托管的 OpenAI Codex（通过 MCP）Web 界面，支持 TOTP 登录、可恢复会话、浏览器交互式 Terminal，以及一键部署。
 
 该项目由 Node.js 后端 + React 前端组成，适合在局域网或公网远程访问，并支持通过 `/codex` 路径反向代理。
 
@@ -10,7 +10,7 @@
 
 - Codex Web Chat UI
 - 流式回复与自动重连
-- OTP（控制台验证码）与可选 TOTP 登录
+- TOTP 登录（首次登录自动展示二维码）
 - 会话与聊天持久化（`DATA_DIR`，默认 `data`）
 - `/status` 状态与用量信息
 - 聊天内 `/web help` 命令
@@ -58,12 +58,6 @@ npm run start
 
 ## 登录认证
 
-### OTP
-
-- 登录页点击 `Request OTP`
-- 在后端日志中查看 6 位验证码
-- 输入并验证
-
 ### TOTP（推荐）
 
 1. 生成密钥：
@@ -75,16 +69,13 @@ node -e "const { authenticator } = require('otplib'); console.log(authenticator.
 
 2. 设置环境变量：
 
-- `AUTH_MODE=totp`
 - `TOTP_SECRET=<你的密钥>`
-- `PRINT_TOTP_QR=true`
+- `PRINT_TOTP_QR=true`（可选：在后端日志打印二维码）
 
-3. 重启后扫码（如果登录页开启二维码展示）
+3. 重启并打开登录页：
 
-可选项：
-
-- `EXPOSE_TOTP_URI=true`：登录页可显示二维码
-- `EXPOSE_TOTP_URI=false`：隐藏二维码（公网更安全）
+- 首次登录时，页面会自动获取并展示 TOTP 二维码
+- 首次成功登录后，二维码不再可获取
 
 ## Web 命令
 
@@ -96,7 +87,7 @@ node -e "const { authenticator } = require('otplib'); console.log(authenticator.
 ### 凭据登录（Credential）
 
 - 登录后可通过 API 创建凭据：`POST /api/auth/credential`
-- 使用凭据免 OTP/TOTP 登录：`POST /api/auth/credential/login`
+- 使用凭据直接登录：`POST /api/auth/credential/login`
 - 凭据列表与吊销：
   - `GET /api/auth/credentials`
   - `POST /api/auth/credential/revoke`
@@ -214,8 +205,6 @@ CODEREMOTEAPP_LOG=/path/to/log npm run restart
 - `POST /api/chats/:id/abort`
 - `POST /api/terminal`
 - `GET /api/terminals`
-- `POST /api/auth/otp/request`
-- `POST /api/auth/otp/verify`
 - `POST /api/auth/totp/verify`
 - `POST /api/auth/credential/login`
 - `POST /api/auth/credential`

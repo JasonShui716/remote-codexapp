@@ -13,7 +13,6 @@ import {
   fsMkdir,
   fsLs,
   fsRoots,
-  getAuthMode,
   getChat,
   getChatRuntime,
   getDefaults,
@@ -23,8 +22,6 @@ import {
   getTotpStatus,
   getTotpUri,
   logout,
-  otpRequest,
-  otpVerify,
   resetChatSession,
   setActiveChat,
   sendMessageAsync,
@@ -229,48 +226,12 @@ export default function App() {
 }
 
 function Login(props: { onAuthed: () => void | Promise<void> }) {
-  const [mode, setMode] = useState<'otp' | 'totp'>('otp');
-  const [challengeId, setChallengeId] = useState<string | null>(null);
   const [otp, setOtp] = useState('');
   const [status, setStatus] = useState<string>('');
   const [statusKind, setStatusKind] = useState<'info' | 'error' | 'success'>('info');
   const [totpQr, setTotpQr] = useState<string | null>(null);
-  const [showTotpSetup, setShowTotpSetup] = useState(false);
   const [totpProvisioned, setTotpProvisioned] = useState(false);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const r = await getAuthMode();
-      if (cancelled) return;
-      if (r.ok && r.mode) setMode(r.mode);
-    })().catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (mode !== 'totp') return;
-    (async () => {
-      const r = await getTotpStatus();
-      if (cancelled) return;
-      if (r.ok && typeof r.provisioned === 'boolean') setTotpProvisioned(r.provisioned);
-    })().catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [mode]);
-
-  useEffect(() => {
-    // If provisioning got locked while this page was open, hide QR immediately.
-    if (totpProvisioned) {
-      setShowTotpSetup(false);
-      setTotpQr(null);
-    }
-  }, [totpProvisioned]);
 
   const hintId = 'login-hint';
 
@@ -279,15 +240,59 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
     setStatus(msg);
   };
 
-  const verifyEnabled = otp.length === 6 && (mode === 'totp' || !!challengeId) && !busy;
+  const refreshTotpQr = async () => {
+    if (busy) return;
+    setBusy(true);
+    setStatusMsg('info', 'Loading QR...');
+    try {
+      const statusResp = await getTotpStatus().catch(() => ({ ok: false } as const));
+      if (!statusResp.ok) {
+        setStatusMsg('error', 'Failed to load TOTP status.');
+        return;
+      }
+      if (!statusResp.enabled) {
+        setTotpQr(null);
+        setStatusMsg('error', 'TOTP is not configured on server.');
+        return;
+      }
+      const provisioned = Boolean(statusResp.provisioned);
+      setTotpProvisioned(provisioned);
+      if (provisioned) {
+        setTotpQr(null);
+        setStatusMsg('info', '');
+        return;
+      }
+
+      const uriResp = await getTotpUri().catch(() => ({ ok: false } as const));
+      if (!uriResp.ok || !uriResp.uri) {
+        setTotpQr(null);
+        setStatusMsg('error', 'QR not available.');
+        return;
+      }
+
+      const dataUrl = await QRCode.toDataURL(uriResp.uri, { margin: 1, width: 240 });
+      setTotpQr(dataUrl);
+      setStatusMsg('info', '');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshTotpQr();
+  }, []);
+
+  const verifyEnabled = otp.length === 6 && !busy;
 
   const doVerify = async () => {
     if (!verifyEnabled) return;
     setBusy(true);
     setStatusMsg('info', 'Verifying...');
     try {
-      const r = mode === 'otp' ? await otpVerify(challengeId!, otp) : await totpVerify(otp);
+      const r = await totpVerify(otp);
       if (r.ok) {
+        setTotpProvisioned(true);
+        setTotpQr(null);
         setStatusMsg('success', 'OK');
         await props.onAuthed();
       } else {
@@ -300,71 +305,33 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
     }
   };
 
-  const doTotpSetup = async () => {
-    if (busy || totpProvisioned) return;
-    setShowTotpSetup(true);
-    if (totpQr) return;
-    setBusy(true);
-    setStatusMsg('info', 'Loading QR...');
-    try {
-      const r = await getTotpUri().catch(() => ({ ok: false } as any));
-      if (!r.ok || !r.uri) {
-        setStatusMsg('error', 'QR not available.');
-        return;
-      }
-      const dataUrl = await QRCode.toDataURL(r.uri, { margin: 1, width: 240 });
-      setTotpQr(dataUrl);
-      setStatusMsg('success', '');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="page">
       <div className="card">
         <div className="title">Codex Web Chat</div>
-        <div className="subtitle">
-          {mode === 'otp' ? 'OTP login (server logs the code)' : 'TOTP login (scan once in an authenticator app)'}
-        </div>
+        <div className="subtitle">TOTP login (scan once in an authenticator app)</div>
 
-        {mode === 'totp' && !totpProvisioned ? (
-          <div className="row">
-            <button
-              className="btn btn-secondary"
-              disabled={busy}
-              onClick={doTotpSetup}
-            >
-              Setup Authenticator (QR)
-            </button>
-          </div>
-        ) : null}
-
-        {mode === 'otp' ? (
-          <div className="row">
-            <button
-              className="btn"
-              onClick={async () => {
-                if (busy) return;
-                setBusy(true);
-                setStatusMsg('info', 'Requesting OTP...');
-                try {
-                  const r = await otpRequest();
-                  if (r.ok && r.challengeId) {
-                    setChallengeId(r.challengeId);
-                    setStatusMsg('success', 'OTP requested. Check server logs for the 6-digit code.');
-                  } else {
-                    setStatusMsg('error', `OTP request failed: ${r.error || 'unknown'}`);
-                  }
-                } catch (e: any) {
-                  setStatusMsg('error', `OTP request failed: ${String(e?.message || e)}`);
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              {busy ? 'Working...' : 'Request OTP'}
-            </button>
+        {!totpProvisioned ? (
+          <div className="setup">
+            <div className="subtitle">First login: scan this QR with your authenticator app.</div>
+            {totpQr ? (
+              <div className="qr">
+                <img src={totpQr} width={240} height={240} alt="TOTP QR" />
+              </div>
+            ) : (
+              <div className="status">QR is not available right now.</div>
+            )}
+            <div className="row">
+              <button
+                className="btn btn-secondary"
+                onClick={async () => {
+                  await refreshTotpQr();
+                }}
+                disabled={busy}
+              >
+                {busy ? 'Working...' : 'Reload QR'}
+              </button>
+            </div>
           </div>
         ) : null}
 
@@ -401,45 +368,11 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
         </div>
 
         <div className="hint" id={hintId}>
-          {mode === 'otp'
-            ? 'After clicking Request OTP, check the backend console for the code.'
-            : totpProvisioned
-              ? 'TOTP is already provisioned. Enter the 6-digit code from your authenticator app.'
-              : 'Enter the 6-digit code from your authenticator app. (QR setup is only available once)'}
+          {totpProvisioned
+            ? 'Enter the 6-digit code from your authenticator app.'
+            : 'Scan the QR first, then enter the 6-digit code from your authenticator app.'}
         </div>
         {status ? <div className={`status ${statusKind === 'error' ? 'status-error' : statusKind === 'success' ? 'status-success' : ''}`}>{status}</div> : null}
-        {mode === 'totp' && showTotpSetup ? (
-          <div className="setup">
-            <div className="subtitle">Scan once with an authenticator app.</div>
-            {totpQr ? (
-              <div className="qr">
-                <img src={totpQr} width={240} height={240} alt="TOTP QR" />
-              </div>
-            ) : (
-              <div className="status">QR is not available (it may be disabled or already provisioned).</div>
-            )}
-            <div className="row">
-              <button
-                className="btn btn-secondary"
-                onClick={async () => {
-                  if (totpProvisioned) return;
-                  await doTotpSetup();
-                }}
-              >
-                {busy ? 'Working...' : 'Reload QR'}
-              </button>
-              <button
-                className="btn btn-secondary"
-                onClick={() => {
-                  setShowTotpSetup(false);
-                  setTotpQr(null);
-                }}
-              >
-                Hide
-              </button>
-            </div>
-          </div>
-        ) : null}
       </div>
     </div>
   );

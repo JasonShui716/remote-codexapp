@@ -111,12 +111,6 @@ export async function apiMe(): Promise<{ ok: boolean; sessionId?: string; active
   return await r.json();
 }
 
-export async function getAuthMode(): Promise<{ ok: boolean; mode?: 'otp' | 'totp' }> {
-  const r = await fetch(apiUrl('/api/auth/mode'), { credentials: 'include' });
-  if (!r.ok) return { ok: false };
-  return await r.json();
-}
-
 export async function getTotpStatus(): Promise<{ ok: boolean; enabled?: boolean; provisioned?: boolean }> {
   const r = await fetch(apiUrl('/api/auth/totp/status'), { credentials: 'include' });
   if (!r.ok) return { ok: false };
@@ -126,25 +120,6 @@ export async function getTotpStatus(): Promise<{ ok: boolean; enabled?: boolean;
 export async function getTotpUri(): Promise<{ ok: boolean; uri?: string }> {
   const r = await fetch(apiUrl('/api/auth/totp/uri'), { credentials: 'include' });
   if (!r.ok) return { ok: false };
-  return await r.json();
-}
-
-export async function otpRequest(): Promise<{ ok: boolean; challengeId?: string; error?: string }> {
-  const r = await fetch(apiUrl('/api/auth/otp/request'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include'
-  });
-  return await r.json();
-}
-
-export async function otpVerify(challengeId: string, otp: string): Promise<{ ok: boolean; error?: string }> {
-  const r = await fetch(apiUrl('/api/auth/otp/verify'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({ challengeId, otp })
-  });
   return await r.json();
 }
 

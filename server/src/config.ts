@@ -10,7 +10,6 @@ const EnvSchema = z.object({
   HOST: z.string().default('127.0.0.1'),
   PORT: z.coerce.number().int().positive().default(18888),
   SESSION_TTL_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
-  OTP_TTL_MS: z.coerce.number().int().positive().default(10 * 60 * 1000),
   STUCK_RUNNING_ABORT_MS: z.coerce.number().int().positive().default(45 * 1000),
   DATA_DIR: z.preprocess(emptyToUndefined, z.string()).default('data'),
 
@@ -36,15 +35,10 @@ const EnvSchema = z.object({
   CODEX_SESSIOND_PORT: z.coerce.number().int().positive().default(18999),
   CODEX_SESSIOND_AUTO_START: z.coerce.boolean().default(true),
 
-  // Auth mode:
-  // - otp: request OTP and read from server console logs (current default)
-  // - totp: scan once in an authenticator app, then enter 6-digit code
-  AUTH_MODE: z.enum(['otp', 'totp']).default('otp'),
   TOTP_SECRET: z.preprocess(emptyToUndefined, z.string().optional()), // base32
   TOTP_ISSUER: z.string().default('Codex Remoteapp'),
   TOTP_ACCOUNT: z.string().default('codex'),
   PRINT_TOTP_QR: z.coerce.boolean().default(false),
-  EXPOSE_TOTP_URI: z.coerce.boolean().default(false),
   // Relative paths are resolved relative to the server process cwd (typically `server/`).
   // If this file exists, TOTP provisioning is considered "done" and QR/URI will no longer be served/printed.
   TOTP_PROVISION_FILE: z.string().default('.totp_provisioned'),

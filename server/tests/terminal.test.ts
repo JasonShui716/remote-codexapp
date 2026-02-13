@@ -99,10 +99,8 @@ async function startServerForTest(): Promise<StartedServer> {
       CWD_ROOTS: workspaceDir,
       CODEX_SESSIOND_AUTO_START: 'false',
       SESSION_SECRET: '0123456789abcdef0123456789abcdef',
-      AUTH_MODE: 'totp',
       TOTP_SECRET: 'JBSWY3DPEHPK3PXP',
       PRINT_TOTP_QR: 'false',
-      EXPOSE_TOTP_URI: 'false',
       TOTP_PROVISION_FILE: path.join(tmpDir, '.totp-provisioned')
     },
     stdio: ['ignore', 'pipe', 'pipe']
