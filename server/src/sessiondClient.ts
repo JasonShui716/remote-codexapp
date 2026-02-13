@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import type {
   CodexApprovalDecision,
@@ -83,19 +85,39 @@ export class SessiondClient {
     }
   }
 
+  private resolveNpmRunCommand(): { command: string; args: string[] } {
+    const raw = (process.env.npm_execpath || '').trim();
+    const candidates: string[] = [];
+    if (raw) {
+      if (path.isAbsolute(raw)) {
+        candidates.push(raw);
+      } else {
+        candidates.push(path.resolve(process.cwd(), raw));
+        candidates.push(path.resolve(this.serverCwd, raw));
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate || !fs.existsSync(candidate)) continue;
+      if (candidate.endsWith('.js')) {
+        return { command: process.execPath, args: [candidate, 'run', 'sessiond'] };
+      }
+      return { command: candidate, args: ['run', 'sessiond'] };
+    }
+
+    return { command: 'npm', args: ['run', 'sessiond'] };
+  }
+
   private spawnSessiond(): void {
-    const npmExecPath = (process.env.npm_execpath || '').trim();
-    const useNodeNpmExec = npmExecPath.endsWith('.js');
-    const command = useNodeNpmExec ? process.execPath : 'npm';
-    const args = useNodeNpmExec ? [npmExecPath, 'run', 'sessiond'] : ['run', 'sessiond'];
+    const { command, args } = this.resolveNpmRunCommand();
     const child = spawn(command, args, {
       cwd: this.serverCwd,
       detached: true,
       stdio: 'ignore',
       env: process.env
     });
-    child.on('error', () => {
-      // Keep API process alive; caller will see sessiond_unavailable if start failed.
+    child.on('error', (err) => {
+      console.warn(`[server] failed to spawn sessiond via ${command}: ${String((err as any)?.message || err)}`);
     });
     child.unref();
   }
