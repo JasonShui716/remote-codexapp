@@ -20,7 +20,7 @@ const EnvSchema = z.object({
 
   // Codex CLI needs OpenAI credentials in environment, typically OPENAI_API_KEY.
   // We don't read it here; Codex reads it directly.
-  CODEX_MODEL: z.preprocess(emptyToUndefined, z.string().default('gpt-5.3-codex-spark')),
+  CODEX_MODEL: z.preprocess(emptyToUndefined, z.string().default('gpt-5.3-codex')),
   CODEX_REASONING_EFFORT: z.preprocess(
     emptyToUndefined,
     z.enum(['low', 'medium', 'high', 'xhigh']).default('high')

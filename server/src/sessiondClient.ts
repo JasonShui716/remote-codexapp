@@ -84,11 +84,18 @@ export class SessiondClient {
   }
 
   private spawnSessiond(): void {
-    const child = spawn('npm', ['run', 'sessiond'], {
+    const npmExecPath = (process.env.npm_execpath || '').trim();
+    const useNodeNpmExec = npmExecPath.endsWith('.js');
+    const command = useNodeNpmExec ? process.execPath : 'npm';
+    const args = useNodeNpmExec ? [npmExecPath, 'run', 'sessiond'] : ['run', 'sessiond'];
+    const child = spawn(command, args, {
       cwd: this.serverCwd,
       detached: true,
       stdio: 'ignore',
       env: process.env
+    });
+    child.on('error', () => {
+      // Keep API process alive; caller will see sessiond_unavailable if start failed.
     });
     child.unref();
   }
