@@ -1,6 +1,6 @@
 # Codex Remote Web Chat
 
-Self-hosted browser UI for OpenAI Codex (via MCP), with OTP/TOTP auth, credential-based login, resumable chat sessions, terminal creation, and one-command deployment. Search tags: `codex`, `remote`, `web chat`, `terminal`, `otp`, `totp`, `credential`, `access token`, `nginx`, `systemd`, `nodejs`.
+Self-hosted browser UI for OpenAI Codex (via MCP), with OTP/TOTP auth, resumable chat sessions, interactive browser terminal, and one-command deployment. Search tags: `codex`, `remote`, `web chat`, `terminal`, `otp`, `totp`, `nginx`, `systemd`, `nodejs`.
 
 This project is a small Node.js + React frontend/backend app that exposes Codex as a web service. It is designed for remote access from another machine (internet or LAN) and includes path-based proxy support under `/codex`.
 
@@ -12,7 +12,8 @@ This project is a small Node.js + React frontend/backend app that exposes Codex 
 - Persistent sessions/chats via `DATA_DIR` (default: `data`)
 - `/status` command support with usage/rate-limit status
 - `/web help` in chat for web-only commands
-- Terminal management APIs (`POST /api/terminal`, `GET /api/terminals`)
+- Interactive terminal (WebSocket + PTY) with session-scoped terminal tabs
+- Terminal management APIs (`POST /api/terminal`, `GET /api/terminals`, `GET /ws/terminal`)
 - Remote deployment script with Nginx + systemd bootstrap
 - Interactive prompt mode for deployment domain
 - Existing `/codex` route replacement on target machine
@@ -104,8 +105,22 @@ Optional:
 
 - Create terminal: `POST /api/terminal`
 - List terminal sessions: `GET /api/terminals`
-- If deployed under `/codex`, compatibility path `/codex/api/terminals` is also supported
-- The UI displays terminal sessions in the side list and shows created terminal IDs/CWD
+- Connect terminal websocket:
+  - direct: `GET /ws/terminal?terminalId=<id>`
+  - under `/codex`: `GET /codex/ws/terminal?terminalId=<id>`
+- Terminal and chat are peer sessions in the sidebar; switching tabs swaps the main content area
+- If deployed under `/codex`, compatibility APIs are also available:
+  - `POST /codex/api/terminal`
+  - `GET /codex/api/terminals`
+
+### Nginx requirement for terminal websocket
+
+When reverse-proxying `/codex`, websocket upgrade headers are required in the `/codex/` location:
+
+```nginx
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection $connection_upgrade;
+```
 
 ## Deployment (One-command, target machine)
 
@@ -132,6 +147,28 @@ sudo APP_DIR=/opt/remote-codexapp \
 
 For first deploy, leave `DOMAIN` empty in interactive mode and input your host when prompted.
 
+### One-click wrapper (recommended)
+
+You can also use the wrapper script (it runs `deploy-remote.sh` with sane defaults):
+
+```bash
+# interactive domain prompt
+bash scripts/deploy-one-click.sh
+
+# or pass domain directly
+bash scripts/deploy-one-click.sh your.domain.com
+```
+
+Common overrides:
+
+```bash
+APP_DIR=/opt/remote-codexapp \
+APP_PORT=18888 \
+NGINX_PATH=/codex \
+GIT_BRANCH=main \
+bash scripts/deploy-one-click.sh your.domain.com
+```
+
 ### What deploy script does
 
 - Pulls or clones repo
@@ -139,6 +176,7 @@ For first deploy, leave `DOMAIN` empty in interactive mode and input your host w
 - Writes/patches `server/.env` (`HOST/PORT/CODEX_CWD`)
 - Installs/updates systemd unit `/etc/systemd/system/codex-remoteapp.service`
 - Generates/reloads Nginx config for reverse proxy path
+- Includes websocket upgrade forwarding for terminal (`/codex/ws/terminal`)
 - Auto-replaces existing bindings on `/codex` (backed up as `.bak.<timestamp>`)
 
 Skip nginx config (code-only update):

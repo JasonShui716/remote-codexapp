@@ -247,6 +247,10 @@ body {
   overflow: hidden;
 }
 
+.chat-main-terminal {
+  min-height: 0;
+}
+
 .sidebar-head {
   display: flex;
   align-items: center;
@@ -422,7 +426,12 @@ body {
 }
 
 .terminal-panel {
-  padding: 0 16px 12px;
+  padding: 10px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
 }
 
 .terminal-panel-head {
@@ -430,7 +439,6 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 8px;
 }
 
 .terminal-panel-title {
@@ -457,10 +465,37 @@ body {
   display: grid;
   grid-template-columns: 72px 1fr;
   gap: 8px 10px;
-  margin-bottom: 8px;
   font-size: 13px;
   align-items: center;
   overflow-wrap: anywhere;
+}
+
+.terminal-live-wrap {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+.terminal-live {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  background: #0b1118;
+  padding: 8px;
+}
+
+.terminal-live .xterm {
+  height: 100%;
+}
+
+.terminal-live .xterm-viewport {
+  border-radius: 8px;
+}
+
+.terminal-panel .row-tight {
+  margin-top: 0;
 }
 
 .msg {
@@ -507,6 +542,11 @@ body {
   border-top: 1px solid rgba(255, 255, 255, 0.10);
   background: rgba(0, 0, 0, 0.12);
   padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+}
+
+.composer-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .textarea {

@@ -8,10 +8,13 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import qrcode from 'qrcode-terminal';
 import { authenticator } from 'otplib';
+import pty, { type IPty } from 'node-pty';
+import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 
 import { readEnv } from './config.js';
 import { MemoryStore, type StreamEvent } from './store.js';
@@ -74,7 +77,16 @@ type TerminalSessionRecord = {
   status: 'running' | 'stopped';
 };
 
+type TerminalRuntime = {
+  sid: string;
+  record: TerminalSessionRecord;
+  pty: IPty;
+  clients: Set<WebSocket>;
+};
+
 const terminalSessionsBySid = new Map<string, TerminalSessionRecord[]>();
+const terminalRuntimeById = new Map<string, TerminalRuntime>();
+const terminalWss = new WebSocketServer({ noServer: true });
 
 const CLI_HISTORY_CACHE_TTL_MS = 30_000;
 const CLI_HISTORY_SCAN_FILE_LIMIT = 200;
@@ -90,9 +102,174 @@ function createTerminalRecord(sid: string, cwd: string): TerminalSessionRecord {
   };
   const list = terminalSessionsBySid.get(sid) || [];
   list.unshift(terminal);
-  if (list.length > 20) list.length = 20;
   terminalSessionsBySid.set(sid, list);
+  while (list.length > 20) {
+    const removed = list.pop();
+    if (!removed) break;
+    disposeTerminalRuntime(removed.id);
+  }
   return terminal;
+}
+
+function parseCookieHeader(raw: string | undefined): Record<string, string> {
+  if (!raw) return {};
+  const out: Record<string, string> = {};
+  for (const chunk of raw.split(';')) {
+    const part = chunk.trim();
+    if (!part) continue;
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(value);
+    } catch {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function readSessionIdFromUpgradeRequest(req: IncomingMessage): string | null {
+  const cookieHeader = req.headers.cookie;
+  const cookieValue = Array.isArray(cookieHeader) ? cookieHeader.join('; ') : cookieHeader;
+  const cookies = parseCookieHeader(cookieValue);
+  const rawSid = cookies.sid;
+  if (!rawSid) return null;
+
+  let sid: string | null = null;
+  if (rawSid.startsWith('s:')) {
+    const unsigned = cookieParser.signedCookie(rawSid, env.SESSION_SECRET);
+    if (typeof unsigned === 'string') sid = unsigned;
+  } else {
+    sid = rawSid;
+  }
+
+  if (!sid) return null;
+  const session = store.getSession(sid);
+  if (!session) return null;
+  store.refreshSession(sid);
+  return sid;
+}
+
+function rejectUpgrade(socket: net.Socket, code: number, message: string): void {
+  if (socket.destroyed) return;
+  socket.write(`HTTP/1.1 ${code} ${message}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
+
+function rawDataToString(raw: RawData): string {
+  if (typeof raw === 'string') return raw;
+  if (raw instanceof Buffer) return raw.toString('utf8');
+  if (raw instanceof ArrayBuffer) return Buffer.from(raw).toString('utf8');
+  if (Array.isArray(raw)) return Buffer.concat(raw).toString('utf8');
+  return Buffer.from(raw).toString('utf8');
+}
+
+function shellForTerminal(): { command: string; args: string[] } {
+  const shell = process.env.SHELL?.trim();
+  if (shell) {
+    return { command: shell, args: process.platform === 'win32' ? [] : ['-l'] };
+  }
+  if (process.platform === 'win32') return { command: 'powershell.exe', args: [] };
+  return { command: '/bin/bash', args: ['-l'] };
+}
+
+function bindTerminalSocket(socket: WebSocket, runtime: TerminalRuntime): void {
+  runtime.clients.add(socket);
+
+  socket.on('message', (raw) => {
+    const text = rawDataToString(raw);
+    if (!text) return;
+    if (text.startsWith('{')) {
+      try {
+        const payload = JSON.parse(text) as { type?: string; cols?: number; rows?: number };
+        if (payload.type === 'resize') {
+          const cols = Math.max(2, Math.floor(Number(payload.cols)));
+          const rows = Math.max(1, Math.floor(Number(payload.rows)));
+          if (Number.isFinite(cols) && Number.isFinite(rows)) runtime.pty.resize(cols, rows);
+          return;
+        }
+      } catch {
+        // Fallback to write raw text into the terminal.
+      }
+    }
+    runtime.pty.write(text);
+  });
+
+  socket.on('close', () => {
+    runtime.clients.delete(socket);
+  });
+
+  socket.on('error', () => {
+    runtime.clients.delete(socket);
+  });
+}
+
+function createTerminalRuntime(sid: string, cwd: string): TerminalSessionRecord {
+  const record = createTerminalRecord(sid, cwd);
+  const shell = shellForTerminal();
+  const child = pty.spawn(shell.command, shell.args, {
+    name: 'xterm-256color',
+    cols: 120,
+    rows: 30,
+    cwd,
+    env: {
+      ...process.env,
+      TERM: 'xterm-256color'
+    }
+  });
+
+  const runtime: TerminalRuntime = {
+    sid,
+    record,
+    pty: child,
+    clients: new Set<WebSocket>()
+  };
+  terminalRuntimeById.set(record.id, runtime);
+
+  child.onData((chunk) => {
+    for (const client of runtime.clients) {
+      if (client.readyState === 1) client.send(chunk);
+    }
+  });
+
+  child.onExit(() => {
+    runtime.record.status = 'stopped';
+    terminalRuntimeById.delete(runtime.record.id);
+    for (const client of runtime.clients) {
+      try {
+        client.close(1011, 'terminal_exited');
+      } catch {
+        // ignore close failures
+      }
+    }
+    runtime.clients.clear();
+  });
+
+  return record;
+}
+
+function disposeTerminalRuntime(terminalId: string): void {
+  const runtime = terminalRuntimeById.get(terminalId);
+  if (!runtime) return;
+
+  runtime.record.status = 'stopped';
+  terminalRuntimeById.delete(terminalId);
+  for (const client of runtime.clients) {
+    try {
+      client.close(1000, 'terminal_closed');
+    } catch {
+      // ignore close failures
+    }
+  }
+  runtime.clients.clear();
+  try {
+    runtime.pty.kill();
+  } catch {
+    // ignore kill failures
+  }
 }
 
 function resolveCodexHomePath(): string {
@@ -1311,7 +1488,7 @@ app.post('/api/auth/totp/verify', (req, res) => {
     return res.status(400).json({ ok: false, error: 'bad_request' });
   }
 
-  authenticator.options = { window: 1 };
+  authenticator.options = { window: 2 };
   const ok = authenticator.check(parsed.data.code, env.TOTP_SECRET);
   if (!ok) {
     return res.status(401).json({ ok: false, error: 'invalid' });
@@ -1332,61 +1509,20 @@ app.post('/api/auth/totp/verify', (req, res) => {
   res.json({ ok: true, sessionId: session.id, expiresInMs: env.SESSION_TTL_MS });
 });
 
-const createCredentialHandler = (req: express.Request, res: express.Response) => {
-  const sid = requireAuth(req, res);
-  if (!sid) return;
-
-  const parsed = CreateCredentialSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: 'bad_request' });
-  }
-
-  const result = store.createCredential(sid, parsed.data.label);
-  res.json({
-    ok: true,
-    credential: result.token,
-    credentialId: result.id,
-    createdAt: result.createdAt,
-    label: result.label
-  });
+const createCredentialHandler = (_req: express.Request, res: express.Response) => {
+  res.status(404).json({ ok: false, error: 'disabled' });
 };
 
-const credentialLoginHandler = (req: express.Request, res: express.Response) => {
-  const parsed = CredentialLoginSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: 'bad_request' });
-  }
-
-  const r = store.consumeCredential(parsed.data.credential);
-  if (!r.ok) {
-    return res.status(401).json({ ok: false, error: r.error });
-  }
-
-  setSessionCookie(res, r.session.id);
-  res.json({
-    ok: true,
-    sessionId: r.session.id,
-    credentialId: r.credentialId,
-    expiresInMs: env.SESSION_TTL_MS
-  });
+const credentialLoginHandler = (_req: express.Request, res: express.Response) => {
+  res.status(404).json({ ok: false, error: 'disabled' });
 };
 
-const listCredentialsHandler = (req: express.Request, res: express.Response) => {
-  const sid = requireAuth(req, res);
-  if (!sid) return;
-  res.json({ ok: true, credentials: store.listCredentialsForSession(sid) });
+const listCredentialsHandler = (_req: express.Request, res: express.Response) => {
+  res.status(404).json({ ok: false, error: 'disabled' });
 };
 
-const revokeCredentialHandler = (req: express.Request, res: express.Response) => {
-  const sid = requireAuth(req, res);
-  if (!sid) return;
-
-  const parsed = RevokeCredentialSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ ok: false, error: 'bad_request' });
-
-  const ok = store.revokeCredential(sid, parsed.data.credentialId);
-  if (!ok) return res.status(404).json({ ok: false, error: 'not_found' });
-  res.json({ ok: true });
+const revokeCredentialHandler = (_req: express.Request, res: express.Response) => {
+  res.status(404).json({ ok: false, error: 'disabled' });
 };
 
 app.post('/api/auth/credential', createCredentialHandler);
@@ -1427,7 +1563,14 @@ const createTerminalHandler = (req: express.Request, res: express.Response) => {
   const resolved = resolveAllowedDir(cwdInput);
   if (!resolved.ok) return res.status(400).json({ ok: false, error: resolved.error });
 
-  const terminal = createTerminalRecord(sid, resolved.real);
+  let terminal: TerminalSessionRecord;
+  try {
+    terminal = createTerminalRuntime(sid, resolved.real);
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : 'terminal_spawn_failed';
+    console.error(`[terminal] failed to spawn shell: ${msg}`);
+    return res.status(500).json({ ok: false, error: 'terminal_spawn_failed' });
+  }
   res.json({
     ok: true,
     terminal: {
@@ -1923,7 +2066,7 @@ async function findAvailablePort(host: string, startPort: number): Promise<numbe
 }
 
 const port = await findAvailablePort(env.HOST, env.PORT);
-app.listen(port, env.HOST, () => {
+const server = app.listen(port, env.HOST, () => {
   console.log(`[server] listening on http://${env.HOST}:${port}`);
   console.log(`[server] Codex: sandbox=${env.CODEX_SANDBOX} approvalPolicy=${env.CODEX_APPROVAL_POLICY} cwd=${env.CODEX_CWD}`);
   console.log(
@@ -1961,4 +2104,49 @@ app.listen(port, env.HOST, () => {
       console.log(`[server] TOTP already provisioned (marker exists at ${totpProvisionPath}); not printing QR.`);
     }
   }
+});
+
+server.on('upgrade', (req, socket, head) => {
+  const reqUrl = req.url || '/';
+  const host = req.headers.host || `${env.HOST}:${port}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(reqUrl, `http://${host}`);
+  } catch {
+    rejectUpgrade(socket, 400, 'Bad Request');
+    return;
+  }
+
+  if (parsed.pathname !== '/ws/terminal' && parsed.pathname !== '/codex/ws/terminal') {
+    rejectUpgrade(socket, 404, 'Not Found');
+    return;
+  }
+
+  const sid = readSessionIdFromUpgradeRequest(req);
+  if (!sid) {
+    console.warn(`[terminal-ws] unauthorized upgrade path=${parsed.pathname}`);
+    rejectUpgrade(socket, 401, 'Unauthorized');
+    return;
+  }
+
+  const terminalId = parsed.searchParams.get('terminalId')?.trim();
+  if (!terminalId) {
+    console.warn(`[terminal-ws] missing terminalId sid=${sid}`);
+    rejectUpgrade(socket, 400, 'Bad Request');
+    return;
+  }
+
+  const runtime = terminalRuntimeById.get(terminalId);
+  if (!runtime || runtime.sid !== sid || runtime.record.status !== 'running') {
+    console.warn(
+      `[terminal-ws] terminal not found or forbidden sid=${sid} terminalId=${terminalId} found=${Boolean(runtime)}`
+    );
+    rejectUpgrade(socket, 404, 'Not Found');
+    return;
+  }
+
+  terminalWss.handleUpgrade(req, socket, head, (ws) => {
+    console.log(`[terminal-ws] connected sid=${sid} terminalId=${terminalId}`);
+    bindTerminalSocket(ws, runtime);
+  });
 });

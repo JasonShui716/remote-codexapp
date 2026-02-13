@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import './app.css';
 import QRCode from 'qrcode';
+import TerminalPanel from './TerminalPanel';
 import {
   abortChat,
   apiMe,
   apiUrl,
   approveTool,
   createChat,
-  createCredential,
   createTerminal,
-  credentialLogin,
   deleteChat,
   fsMkdir,
   fsLs,
@@ -18,8 +17,6 @@ import {
   getChat,
   getChatRuntime,
   getDefaults,
-  listCredentials,
-  revokeCredential as revokeCredentialApi,
   listTerminals,
   listChats,
   getStatus,
@@ -35,7 +32,6 @@ import {
   updateChatSettings,
   type ChatMessage,
   type Defaults,
-  type CredentialRecord,
   type ModelOption,
   type TerminalSession,
   type ReasoningEffort
@@ -58,6 +54,52 @@ const REASONING_DEFAULT_VALUE = '__default__';
 const REASONING_VALUES: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
 const LOCKED_SANDBOX = 'danger-full-access';
 const LOCKED_APPROVAL_POLICY = 'never';
+const AGENT_PROMPT_TEMPLATE = `你不是被动回答问题的助手，而是一个【自主执行的任务型 agent】。
+你的目标不是“给建议”，而是【把事情真正完成】。
+
+【工作方式】
+- 如果目标不完全明确，你必须先提出一个【可执行的任务拆解】，然后立即开始执行。
+- 一旦目标确定，默认持续推进，不要等待逐步确认。
+- 除非遇到明确歧义、权限或安全风险，否则不要中途停下询问。
+
+【主动行动授权】
+你被明确授权并鼓励：
+- 主动搜索和调研外部信息
+- 对比方案、验证假设、运行示例
+- 补齐你认为缺失但对完成目标必要的信息
+如果没有外部证据或验证，请假设任务尚未完成。
+
+【任务状态（必须持续维护）】
+在整个任务过程中，你必须维护并更新以下状态：
+
+Goal:
+- 最终目标（一句话）
+
+Task Tree:
+- [ ] 子任务（todo / doing / done）
+
+Progress Log:
+- 已完成的关键步骤与结论
+
+Open Questions:
+- 当前不确定但不阻塞推进的问题
+
+Next Actions:
+- 下一步你将立即执行的动作
+
+【输出规则（每一轮都遵守）】
+- 简要说明你刚完成了什么
+- 更新 Task Tree 状态
+- 给出关键发现（如有）
+- 明确写出你接下来将执行的 Next Actions
+不要只停留在总结或建议层。
+
+【默认假设】
+- 用户很忙，不想盯着每一步
+- 默认“继续推进”，除非用户明确说停
+- 如果任务还没达到可交付结果，你就不能结束
+
+现在开始，以任务型 agent 的身份推进用户给出的任何目标。`;
 
 function asReasoningEffort(v: unknown): ReasoningEffort | '' {
   if (typeof v !== 'string') return '';
@@ -196,10 +238,6 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
   const [showTotpSetup, setShowTotpSetup] = useState(false);
   const [totpProvisioned, setTotpProvisioned] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [credential, setCredential] = useState('');
-  const [credentialStatus, setCredentialStatus] = useState('');
-  const [credentialStatusKind, setCredentialStatusKind] = useState<'info' | 'error' | 'success'>('info');
-  const [credentialBusy, setCredentialBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -262,31 +300,6 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
     }
   };
 
-  const doCredentialLogin = async () => {
-    const c = credential.trim();
-    if (!c || credentialBusy) return;
-    setCredentialBusy(true);
-    setCredentialStatus('Verifying credential...');
-    setCredentialStatusKind('info');
-    try {
-      const r = await credentialLogin(c);
-      if (r.ok) {
-        setCredentialStatus('Login successful.');
-        setCredentialStatusKind('success');
-        setCredential('');
-        await props.onAuthed();
-      } else {
-        setCredentialStatus(`Credential login failed: ${r.error || 'invalid credential'}`);
-        setCredentialStatusKind('error');
-      }
-    } catch (e: any) {
-      setCredentialStatus(`Credential login failed: ${String(e?.message || e)}`);
-      setCredentialStatusKind('error');
-    } finally {
-      setCredentialBusy(false);
-    }
-  };
-
   const doTotpSetup = async () => {
     if (busy || totpProvisioned) return;
     setShowTotpSetup(true);
@@ -313,35 +326,6 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
         <div className="title">Codex Web Chat</div>
         <div className="subtitle">
           {mode === 'otp' ? 'OTP login (server logs the code)' : 'TOTP login (scan once in an authenticator app)'}
-        </div>
-
-        <div className="setup">
-          <div className="subtitle">Credential login</div>
-          <div className="row">
-            <input
-              className="input"
-              placeholder="Paste credential token"
-              value={credential}
-              onChange={(e) => {
-                setCredential(e.target.value);
-                if (credentialStatus) setCredentialStatus('');
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  void doCredentialLogin();
-                }
-              }}
-            />
-            <button className="btn" disabled={credentialBusy || !credential.trim()} onClick={() => void doCredentialLogin()}>
-              {credentialBusy ? 'Logging in...' : 'Login with credential'}
-            </button>
-          </div>
-          {credentialStatus ? (
-            <div className={`status ${credentialStatusKind === 'error' ? 'status-error' : credentialStatusKind === 'success' ? 'status-success' : ''}`}>
-              {credentialStatus}
-            </div>
-          ) : null}
         </div>
 
         {mode === 'totp' && !totpProvisioned ? (
@@ -464,15 +448,10 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
 function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId: string) => void | Promise<void>; onLogout: () => void | Promise<void> }) {
   const [chatList, setChatList] = useState<{ id: string; updatedAt: number; createdAt: number; preview?: string }[]>([]);
   const [terminalList, setTerminalList] = useState<TerminalSession[]>([]);
-  const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
-  const [credentialListBusy, setCredentialListBusy] = useState(false);
   const [chatListBusy, setChatListBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [composing, setComposing] = useState(false);
-  const [credentialInput, setCredentialInput] = useState('');
-  const [creatingCredential, setCreatingCredential] = useState(false);
-  const [createdCredential, setCreatedCredential] = useState('');
   const [activeTerminal, setActiveTerminal] = useState<TerminalSession | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -553,48 +532,6 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
     return chats;
   };
 
-  const refreshCredentials = async () => {
-    try {
-      setCredentialListBusy(true);
-      const list = await listCredentials();
-      setCredentials(list);
-    } catch {
-      // ignore list refresh errors
-    } finally {
-      setCredentialListBusy(false);
-    }
-  };
-
-  const createCredentialNow = async () => {
-    if (creatingCredential) return;
-    setCreatedCredential('');
-    setCreatingCredential(true);
-    try {
-      const r = await createCredential(credentialInput.trim() || undefined);
-      if (!r.ok || !r.credential) {
-        setErr(r.error || 'create_credential_failed');
-        return;
-      }
-      setCreatedCredential(r.credential);
-      setCredentialInput('');
-      await refreshCredentials();
-    } catch (e: any) {
-      setErr(String(e?.message || e));
-    } finally {
-      setCreatingCredential(false);
-    }
-  };
-
-  const revokeCredential = async (credentialId: string) => {
-    if (!window.confirm('Revoke this credential?')) return;
-    try {
-      await revokeCredentialApi(credentialId);
-      await refreshCredentials();
-    } catch (e: any) {
-      setErr(String(e?.message || e));
-    }
-  };
-
   const copyCredentialToClipboard = async (value: string) => {
     if (!value) return;
     try {
@@ -655,6 +592,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
         status: terminal.status || 'running'
       };
       setActiveTerminal(normalizedTerminal);
+      setMobileChatListOpen(false);
       setTerminalList((prev) => {
         const cleaned = prev.filter((item) => item.terminalId !== terminal.terminalId);
         return [
@@ -671,10 +609,12 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
 
   const openTerminal = (terminal: TerminalSession) => {
     setActiveTerminal(terminal);
+    setMobileChatListOpen(false);
     addSystem(`Open terminal: ${terminal.terminalId} (cwd=${terminal.cwd || 'default'})`);
   };
 
   const selectChat = (chatId: string) => {
+    setActiveTerminal(null);
     if (chatId !== props.chatId) {
       void props.onSwitchChat(chatId);
     }
@@ -844,7 +784,6 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
       setReasoningEffortInput(asReasoningEffort(savedSettings.reasoningEffort));
       setCwdInput(savedSettings.cwd || '');
       void refreshChatList();
-      void refreshCredentials();
 
       const d = await getDefaults().catch(() => ({ ok: false } as any));
       if (!cancelled && d.ok && d.defaults) {
@@ -1113,12 +1052,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
     const cwd = terminal.cwd || 'default';
     return `${name}  ${cwd}`;
   };
-  const credentialOptionLabel = (credential: CredentialRecord) => {
-    const label = credential.label?.trim();
-    const usage = credential.usedCount ? `used ${credential.usedCount}x` : 'unused';
-    const meta = [label || credential.id, usage].filter(Boolean).join(' · ');
-    return meta;
-  };
+  const isTerminalView = Boolean(activeTerminal);
 
   const modelOptions = defaults?.modelOptions || [];
   const modelInputTrimmed = modelInput.trim();
@@ -1158,7 +1092,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
             {chatList.length > 0 ? chatList.map((chat) => (
               <div key={chat.id} className="session-tab-row">
                 <button
-                  className={`session-tab ${chat.id === props.chatId ? 'active' : ''}`}
+                  className={`session-tab ${chat.id === props.chatId && !isTerminalView ? 'active' : ''}`}
                   disabled={chatListBusy}
                   type="button"
                   title={chatOptionLabel(chat)}
@@ -1188,7 +1122,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
                 {terminalList.map((terminal) => (
                   <div key={terminal.terminalId} className="session-tab-row">
                     <button
-                      className={`session-tab ${terminal.terminalId === activeTerminal?.terminalId ? 'active' : ''}`}
+                      className={`session-tab ${terminal.terminalId === activeTerminal?.terminalId && isTerminalView ? 'active' : ''}`}
                       type="button"
                       disabled={chatListBusy}
                       title={terminalOptionLabel(terminal)}
@@ -1201,76 +1135,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
                 ))}
               </>
             ) : null}
-            <div className="session-tab session-tab-empty" style={{ margin: '10px 0 4px' }}>
-              Access credentials
-            </div>
-            <div className="session-switch">
-              <input
-                className="input input-sm"
-                placeholder="Credential label (optional)"
-                value={credentialInput}
-                disabled={creatingCredential || credentialListBusy}
-                onChange={(e) => setCredentialInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    void createCredentialNow();
-                  }
-                }}
-              />
-              <button
-                className="btn btn-secondary btn-sm"
-                disabled={creatingCredential || credentialListBusy}
-                onClick={() => void createCredentialNow()}
-              >
-                {creatingCredential ? 'Creating...' : 'Create'}
-              </button>
-              <button
-                className="btn btn-secondary btn-sm"
-                disabled={credentialListBusy}
-                onClick={() => void refreshCredentials()}
-              >
-                Reload
-              </button>
-            </div>
-            {createdCredential ? (
-              <div className="status status-success" style={{ margin: '4px 6px 8px', wordBreak: 'break-all' }}>
-                New credential:
-                <div className="session-tab-preview" style={{ marginTop: 4 }}>{createdCredential}</div>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  style={{ marginTop: 6 }}
-                  onClick={() => void copyCredentialToClipboard(createdCredential)}
-                >
-                  Copy
-                </button>
-              </div>
-            ) : null}
-            {credentials.length === 0 ? (
-              <div className="session-tab session-tab-empty">No credentials</div>
-            ) : (
-              credentials.map((credential) => (
-                <div key={credential.id} className="session-tab-row">
-                  <button
-                    className="session-tab"
-                    type="button"
-                    disabled={credentialListBusy}
-                    title={credentialOptionLabel(credential)}
-                  >
-                    <span className="session-tab-id">{credential.id.slice(0, 6)}</span>
-                    <span className="session-tab-preview">{credentialOptionLabel(credential)}</span>
-                  </button>
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    type="button"
-                    disabled={credentialListBusy}
-                    onClick={() => void revokeCredential(credential.id)}
-                  >
-                    Revoke
-                  </button>
-                </div>
-              ))
-            )}
+            {null}
           </div>
           <div className="session-switch">
             <button
@@ -1299,48 +1164,64 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
           </div>
         </aside>
 
-        <section className="chat-main">
+        <section className={`chat-main ${isTerminalView ? 'chat-main-terminal' : ''}`}>
           <div className="topbar">
             {isMobileLayout ? (
               <button className="btn btn-secondary btn-sm mobile-chat-btn" onClick={openChatListMobile}>
                 聊天
               </button>
             ) : null}
-            <div className="title">Codex</div>
+            <div className="title">{isTerminalView ? 'Terminal' : 'Codex'}</div>
             <div className="topmeta">
-              <span className="badge badge-tight">{props.chatId.slice(0, 6)}</span>
-              {busy ? <span className="badge badge-tight badge-running">Running</span> : <span className="badge badge-tight">Idle</span>}
+              <span className="badge badge-tight">
+                {isTerminalView ? activeTerminal?.terminalId.slice(0, 6) : props.chatId.slice(0, 6)}
+              </span>
+              {isTerminalView ? (
+                <span className="badge badge-tight">{activeTerminal?.status || 'running'}</span>
+              ) : busy ? (
+                <span className="badge badge-tight badge-running">Running</span>
+              ) : (
+                <span className="badge badge-tight">Idle</span>
+              )}
             </div>
-            <div className="badge">
-              {settings.model ? `model=${settings.model}` : 'model=default'}{' '}
-              {settings.reasoningEffort ? `effort=${settings.reasoningEffort}` : ''}{' '}
-              {`sandbox=${defaults?.sandbox || LOCKED_SANDBOX}`}{' '}
-              {`approval=${defaults?.approvalPolicy || LOCKED_APPROVAL_POLICY}`}{' '}
-              {settings.cwd ? `cwd=${settings.cwd}` : ''}
-            </div>
+            {!isTerminalView ? (
+              <div className="badge">
+                {settings.model ? `model=${settings.model}` : 'model=default'}{' '}
+                {settings.reasoningEffort ? `effort=${settings.reasoningEffort}` : ''}{' '}
+                {`sandbox=${defaults?.sandbox || LOCKED_SANDBOX}`}{' '}
+                {`approval=${defaults?.approvalPolicy || LOCKED_APPROVAL_POLICY}`}{' '}
+                {settings.cwd ? `cwd=${settings.cwd}` : ''}
+              </div>
+            ) : null}
             <div className="spacer" />
-            <button className="btn btn-secondary btn-sm" onClick={() => setControlsOpen((v) => !v)}>
-              Settings
-            </button>
-            <button
-              className="btn btn-secondary btn-sm"
-              disabled={!busy}
-              onClick={async () => {
-                try {
-                  await abortChat(props.chatId);
-                  addSystem('OK: abort requested');
-                  startPolling();
-                } catch (e: any) {
-                  setErr(String(e?.message || e));
-                }
-              }}
-            >
-              Abort
-            </button>
+            {!isTerminalView ? (
+              <button className="btn btn-secondary btn-sm" onClick={() => setControlsOpen((v) => !v)}>
+                Settings
+              </button>
+            ) : null}
+            {!isTerminalView ? (
+              <button
+                className="btn btn-secondary btn-sm"
+                disabled={!busy}
+                onClick={async () => {
+                  try {
+                    await abortChat(props.chatId);
+                    addSystem('OK: abort requested');
+                    startPolling();
+                  } catch (e: any) {
+                    setErr(String(e?.message || e));
+                  }
+                }}
+              >
+                Abort
+              </button>
+            ) : null}
             <button className="btn btn-secondary" onClick={() => props.onLogout()}>
               Logout
             </button>
           </div>
+          {!isTerminalView ? (
+            <>
         <div className={`controls ${controlsOpen ? 'open' : 'closed'}`}>
           <div className="ctl">
             <div className="ctl-label">Model</div>
@@ -1587,41 +1468,6 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
           </div>
         ) : null}
 
-        {activeTerminal ? (
-          <div className="terminal-panel">
-            <div className="terminal-panel-head">
-              <div className="terminal-panel-title">
-                <span>Active terminal</span>
-                <span className="terminal-panel-id">{activeTerminal.terminalId}</span>
-              </div>
-              <button
-                className="btn btn-secondary btn-sm"
-                type="button"
-                onClick={() => setActiveTerminal(null)}
-              >
-                Close
-              </button>
-            </div>
-            <div className="terminal-panel-grid">
-              <div className="muted">CWD</div>
-              <div>{activeTerminal.cwd || 'default'}</div>
-              <div className="muted">Status</div>
-              <div>{activeTerminal.status || 'running'}</div>
-              <div className="muted">Created</div>
-              <div>{new Date(activeTerminal.createdAt).toLocaleString()}</div>
-            </div>
-            <div className="row row-tight">
-              <button
-                className="btn btn-secondary btn-sm"
-                type="button"
-                onClick={() => void copyCredentialToClipboard(activeTerminal.terminalId)}
-              >
-                Copy terminal id
-              </button>
-            </div>
-          </div>
-        ) : null}
-
         <div className="chat">
           {messages.map((m) => (
             <div key={m.id} className={`msg ${m.role}`}>
@@ -1650,9 +1496,14 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
               }
             }}
           />
-          <button className="btn" disabled={text.trim().length === 0} onClick={() => void send()}>
-            {busy ? 'Queue' : 'Send'}
-          </button>
+          <div className="composer-actions">
+            <button className="btn" onClick={() => setText(AGENT_PROMPT_TEMPLATE)}>
+              prompt
+            </button>
+            <button className="btn" disabled={text.trim().length === 0} onClick={() => void send()}>
+              {busy ? 'Queue' : 'Send'}
+            </button>
+          </div>
         </div>
         <div className="footnote">
           Enter to send, Shift+Enter for newline.
@@ -1756,6 +1607,14 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
             </div>
           </div>
         ) : null}
+            </>
+          ) : activeTerminal ? (
+            <TerminalPanel
+              terminal={activeTerminal}
+              onClose={() => setActiveTerminal(null)}
+              onCopyId={(terminalId) => copyCredentialToClipboard(terminalId)}
+            />
+          ) : null}
       </section>
     </div>
     </div>

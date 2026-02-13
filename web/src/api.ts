@@ -98,6 +98,13 @@ export function apiUrl(path: string): string {
   return `${API_PREFIX}${path}`;
 }
 
+export function terminalWsUrl(terminalId: string): string {
+  if (typeof window === 'undefined') return '';
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const path = apiUrl('/ws/terminal');
+  return `${protocol}//${window.location.host}${path}?terminalId=${encodeURIComponent(terminalId)}`;
+}
+
 export async function apiMe(): Promise<{ ok: boolean; sessionId?: string; activeChatId?: string; expiresInMs?: number }> {
   const r = await fetch(apiUrl('/api/me'), { credentials: 'include' });
   if (!r.ok) return { ok: false };
@@ -152,21 +159,8 @@ export async function totpVerify(code: string): Promise<{ ok: boolean; error?: s
 }
 
 export async function credentialLogin(credential: string): Promise<{ ok: boolean; sessionId?: string; error?: string }> {
-  let r = await fetch(apiUrl('/api/auth/credential/login'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({ credential: credential.trim() })
-  });
-  if (!r.ok && r.status === 404 && API_PREFIX) {
-    r = await fetch('/api/auth/credential/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ credential: credential.trim() })
-    });
-  }
-  return await r.json();
+  void credential;
+  return { ok: false, error: 'disabled' };
 }
 
 export async function createCredential(label?: string): Promise<{
@@ -176,50 +170,17 @@ export async function createCredential(label?: string): Promise<{
   label?: string;
   error?: string;
 }> {
-  let r = await fetch(apiUrl('/api/auth/credential'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({ label: label?.trim() || undefined })
-  });
-  if (!r.ok && r.status === 404 && API_PREFIX) {
-    r = await fetch('/api/auth/credential', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ label: label?.trim() || undefined })
-    });
-  }
-  return await r.json();
+  void label;
+  return { ok: false, error: 'disabled' };
 }
 
 export async function listCredentials(): Promise<CredentialRecord[]> {
-  let r = await fetch(apiUrl('/api/auth/credentials'), { credentials: 'include' });
-  if (!r.ok && r.status === 404 && API_PREFIX) {
-    r = await fetch('/api/auth/credentials', { credentials: 'include' });
-  }
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || !j.ok || !Array.isArray(j.credentials)) throw new Error(j.error || 'failed');
-  return j.credentials as CredentialRecord[];
+  return [];
 }
 
 export async function revokeCredential(credentialId: string): Promise<void> {
-  let r = await fetch(apiUrl('/api/auth/credential/revoke'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({ credentialId })
-  });
-  if (!r.ok && r.status === 404 && API_PREFIX) {
-    r = await fetch('/api/auth/credential/revoke', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ credentialId })
-    });
-  }
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || !j.ok) throw new Error(j.error || 'failed');
+  void credentialId;
+  throw new Error('disabled');
 }
 
 export async function logout(): Promise<void> {
@@ -252,7 +213,12 @@ export async function createTerminal(cwd?: string): Promise<{ ok: boolean; termi
     });
   };
 
+  const looksLikeJson = (res: Response) => (res.headers.get('content-type') || '').toLowerCase().includes('application/json');
   let r = await doCreate(apiUrl('/api/terminal'));
+  if (!looksLikeJson(r) && API_PREFIX) {
+    const fallback = await doCreate('/api/terminal');
+    if (looksLikeJson(fallback)) r = fallback;
+  }
   if (!r.ok && r.status === 404 && API_PREFIX) {
     r = await doCreate('/api/terminal');
   }

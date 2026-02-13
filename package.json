@@ -9,6 +9,7 @@
     "build": "npm -w web run build",
     "dev": "npm run build && npm -w server run dev",
     "start": "npm run build && npm -w server start",
+    "test": "npm -w server test",
     "restart": "bash ./scripts/restart.sh",
     "deploy": "bash ./scripts/deploy-remote.sh"
   }
