@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_URL_DEFAULT="git@github.com:JasonShui716/remote-codexapp.git"
 REPO_URL="${REPO_URL_DEFAULT}"
-GIT_BRANCH="${GIT_BRANCH:-main}"
+GIT_BRANCH="${GIT_BRANCH:-}"
 APP_DIR="${APP_DIR:-/opt/remote-codexapp}"
 NGINX_PATH="${NGINX_PATH:-/codex}"
 DOMAIN="${DOMAIN:-}"
@@ -23,7 +23,7 @@ Usage: $SCRIPT_NAME [options]
 Quick deploy + install:
   --repo <url>       Git repo URL (default: ${REPO_URL_DEFAULT})
   --dir <path>       App install directory (default: ${APP_DIR})
-  --branch <name>    Git branch/tag (default: ${GIT_BRANCH})
+  --branch <name>    Git branch/tag (default: auto-detect remote HEAD, fallback: master)
   --domain <name>    Nginx server_name (default: prompt in interactive mode, _ for wildcard)
   --path <nginx>     Public app path, e.g. /codex (default: ${NGINX_PATH})
   --port <number>    Backend port (default: ${APP_PORT})
@@ -78,6 +78,18 @@ run_as_app_user() {
   fi
 
   su -s /bin/bash "${APP_USER}" -c "$(printf '%q ' "$@")"
+}
+
+detect_remote_default_branch() {
+  local repo_url="$1"
+  local head_ref
+  head_ref="$(run_as_app_user git ls-remote --symref "$repo_url" HEAD 2>/dev/null | awk '/^ref:/ {print $2; exit}')"
+  head_ref="${head_ref#refs/heads/}"
+  if [[ -n "$head_ref" ]]; then
+    printf '%s\n' "$head_ref"
+    return 0
+  fi
+  return 1
 }
 
 ensure_env_value() {
@@ -244,6 +256,15 @@ fi
 if ! run_as_app_user bash -lc 'command -v npm >/dev/null 2>&1'; then
   echo "npm not found for user ${APP_USER}" >&2
   exit 1
+fi
+
+if [[ -z "${GIT_BRANCH}" ]]; then
+  if GIT_BRANCH="$(detect_remote_default_branch "${REPO_URL}")"; then
+    log "Detected remote default branch: ${GIT_BRANCH}"
+  else
+    GIT_BRANCH="master"
+    log "Could not detect remote default branch; falling back to: ${GIT_BRANCH}"
+  fi
 fi
 
 if [[ ! -d "${APP_DIR}" ]]; then

@@ -166,7 +166,7 @@ Common overrides:
 APP_DIR=/opt/remote-codexapp \
 APP_PORT=18888 \
 NGINX_PATH=/codex \
-GIT_BRANCH=main \
+GIT_BRANCH=master \
 bash scripts/deploy-one-click.sh your.domain.com
 ```
 
