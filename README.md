@@ -1,135 +1,128 @@
-# Codex Remote Web Chat (OTP)
+# Codex Remote Web Chat
 
-Minimal web chat UI that talks to a small Node server which runs the local `codex` CLI (via MCP) and streams events back to the browser. Auth is a simple OTP printed to the server console.
+Self-hosted browser UI for OpenAI Codex (via MCP), with OTP/TOTP auth, credential-based login, resumable chat sessions, terminal creation, and one-command deployment. Search tags: `codex`, `remote`, `web chat`, `terminal`, `otp`, `totp`, `credential`, `access token`, `nginx`, `systemd`, `nodejs`.
 
-## Run
+This project is a small Node.js + React frontend/backend app that exposes Codex as a web service. It is designed for remote access from another machine (internet or LAN) and includes path-based proxy support under `/codex`.
 
-1. Configure the server env:
+## Features
+
+- Web chat UI for Codex sessions
+- Streaming assistant responses with auto-reconnect
+- OTP login (console OTP) and optional TOTP login
+- Persistent sessions/chats via `DATA_DIR` (default: `data`)
+- `/status` command support with usage/rate-limit status
+- `/web help` in chat for web-only commands
+- Terminal management APIs (`POST /api/terminal`, `GET /api/terminals`)
+- Remote deployment script with Nginx + systemd bootstrap
+- Interactive prompt mode for deployment domain
+- Existing `/codex` route replacement on target machine
+
+## Architecture
+
+- `server/` API: Node.js/Express service, wraps local `codex mcp-server`
+- `web/` Frontend: Vite + React, deployed from `web/dist`
+- Persistence: `server/.env` config + `DATA_DIR` JSON files
+- Optional reverse proxy path: default `NGINX_PATH=/codex`
+
+## Quick Start (Local)
+
+1. Install dependencies
+
+```bash
+npm install
+```
+
+2. Configure environment
 
 ```bash
 cd server
 cp .env.example .env
-# edit server/.env (sandbox/approval policy/cwd)
-# IMPORTANT: `codex` itself needs OpenAI credentials (typically OPENAI_API_KEY) in the environment.
+# edit server/.env
+# IMPORTANT: codex runtime needs OPENAI credentials in env, typically OPENAI_API_KEY
 ```
 
-2. Build + start:
+3. Start
 
 ```bash
 cd ..
-npm install
 npm run start
 ```
 
-3. Open the URL printed by the server.
-   - Local: `http://127.0.0.1:18888`
-   - LAN/WAN: set `HOST=0.0.0.0` in `server/.env`, then open `http://<server-ip>:18888`
-   - If you still can't reach it from another machine, your cloud firewall / security group likely blocks `18888` (open inbound TCP `18888`).
+4. Open service
 
-4. Login:
-- Click **Request OTP**
-- Check the server console log for the OTP
-- Enter the 6-digit code and **Verify**
+- Local: `http://127.0.0.1:18888`
+- LAN/WAN: set `HOST=0.0.0.0` in `server/.env`, then open `http://<server-ip>:18888`
 
-### Restart (background)
+If you can’t access from another machine, open inbound TCP `18888` in firewall/security group.
 
-Use this command to restart the app and keep it running after you close terminal windows:
+## Auth
 
-```bash
-npm run restart
-```
+### OTP
 
-Defaults:
-- log: `/tmp/codex_remoteapp.log`
-- pid: `.codex_remoteapp.pid`
-- port: `PORT` from `server/.env` (fallback `18888`)
+- On login page click `Request OTP`
+- Read 6-digit code from server log
+- Enter code and verify
 
-Optional overrides:
+### TOTP (recommended for persistent remote devices)
 
-```bash
-CODEREMOTEAPP_LOG=/path/to/log npm run restart
-```
-
-## Notes
-
-- This uses the installed `codex` CLI (`codex mcp-server`). Verify with `codex --version`.
-- Default approval policy is permissive (`never`) and the UI will not require command approval by default.
-- Default startup Codex config (if not overridden in `.env`) is:
-  - `CODEX_MODEL=gpt-5.3-codex-spark`
-  - `CODEX_REASONING_EFFORT=high`
-  - `CODEX_SANDBOX=danger-full-access`
-  - `CODEX_APPROVAL_POLICY=never`
-- Sessions/chats are persisted via `DATA_DIR` (default `data`) and survive backend restarts for unexpired sessions.
-- OTP is not delivered anywhere except server logs (intended for local/dev).
-- The chat supports a few CLI-like slash commands; type `/web help` in the chat.
-  - Web-only commands live under `/web ...` (type `/web help`). All other `/...` inputs are sent to Codex unchanged.
-- The app now also supports `/status` (or `/web status`) and returns live server-side status for all sessions, not just the active chat, so it behaves closer to CLI behavior.
-  - It reads usage/rate-limit data by default from `CODEX_CLI_STATUS_URL`.
-  - If `CODEX_CLI_STATUS_URL` is not set, it defaults to the built-in endpoint `http://127.0.0.1:${PORT}/api/cli-status`.
-  - If you prefer to keep your own source, set `CODEX_CLI_STATUS_URL` to another JSON endpoint.
-  - If an external endpoint is unavailable, it uses a local fallback:
-    - in-memory usage/rate-limit snapshots for this process
-    - and latest token_count/rate limit records from `<CODEX_HOME>/sessions` (default `~/.codex/sessions`), so `/status` can keep showing account-level usage even when current chat runtime is empty.
-  - If no usable usage data exists, UI still keeps the session/rate-limit lines and shows `cli.usage.error=...` when appropriate.
-- In `AUTH_MODE=totp`, all devices that log in with the same TOTP QR share the same logical session (same chat list + Codex session state).
-- Streaming is buffered server-side per chat turn: if the browser disconnects mid-run, Codex continues and the assistant message is still persisted; reloading the page shows the latest output.
-
-Persistence:
-
-- Set `DATA_DIR` (default `data`) in `.env` to keep chats across server restarts.
-- On startup, all unexpired sessions/chats in that directory are loaded automatically.
-- This enables a resumable session: after restart, active chats and their messages come back and `get /api/status` reflects them.
-
-## TOTP (scan-to-setup)
-
-If you want the scan-style OTP (Google Authenticator / 1Password), switch to TOTP:
-
-1. Generate a base32 secret (example):
+1. Configure:
 
 ```bash
 cd server
 node -e "const { authenticator } = require('otplib'); console.log(authenticator.generateSecret());"
 ```
 
-2. Set in `server/.env`:
+2. Set env:
+
 - `AUTH_MODE=totp`
 - `TOTP_SECRET=<your secret>`
 - `PRINT_TOTP_QR=true`
 
-3. Restart `npm run start` and scan the QR printed in the server console.
+3. Restart and scan QR (if exposed via login UI)
 
-Optional (web QR):
-- If you also set `EXPOSE_TOTP_URI=true`, the login page will have a "Setup Authenticator (QR)" button that opens a modal and shows the QR.
-- QR/URI is **one-time globally**: after the first successful TOTP login, the server writes `server/.totp_provisioned` and will no longer serve/print the QR even after restart (delete the file to re-provision).
-- If `EXPOSE_TOTP_URI` is `false`, the modal will show a "not available" message (recommended if the service is exposed to the internet).
+Optional:
 
-## GitHub publish + one-click deploy to another machine
+- `EXPOSE_TOTP_URI=true` enables QR modal in web login
+- `EXPOSE_TOTP_URI=false` keeps QR hidden (recommended for internet exposure)
 
-### Publish to GitHub
+## CLI-like Web Commands
 
-```bash
-git init
-git remote add origin git@github.com:JasonShui716/remote-codexapp.git
-git add .
-git commit -m "Initial commit: remote codex app"
-git branch -M main
-git push -u origin main
-```
+- `/web help`
+- `/web status`
+- `/resume`
+- `/status` is handled server-side and shows live status for running sessions
 
-### One-command deploy on target machine
+### Credential login
+
+- Login page supports entering an issued credential token to create a fresh session without OTP/TOTP.
+- After normal login, open the chat sidebar and use **Access credentials** to create tokens.
+- Created credentials are shown only to the session that created them.
+- Revoke old credentials from the same list.
+- Store credentials securely; the token is shown once when created and cannot be read again later.
+
+## Terminal Support
+
+- Create terminal: `POST /api/terminal`
+- List terminal sessions: `GET /api/terminals`
+- If deployed under `/codex`, compatibility path `/codex/api/terminals` is also supported
+- The UI displays terminal sessions in the side list and shows created terminal IDs/CWD
+
+## Deployment (One-command, target machine)
+
+Use on a fresh host:
 
 ```bash
 git clone git@github.com:JasonShui716/remote-codexapp.git /opt/remote-codexapp
 cd /opt/remote-codexapp
 chmod +x scripts/deploy-remote.sh
 
-# Option 1: interactive domain input (recommended on first deploy)
+# Option A: interactive domain input
 sudo APP_DIR=/opt/remote-codexapp \
   NGINX_PATH=/codex \
   APP_PORT=18888 \
   bash scripts/deploy-remote.sh
 
-# Option 2: explicit domain via env variable
+# Option B: explicit domain (non-interactive)
 sudo APP_DIR=/opt/remote-codexapp \
   DOMAIN=your.domain.com \
   NGINX_PATH=/codex \
@@ -137,18 +130,67 @@ sudo APP_DIR=/opt/remote-codexapp \
   bash scripts/deploy-remote.sh
 ```
 
-The deploy script will:
+For first deploy, leave `DOMAIN` empty in interactive mode and input your host when prompted.
 
-- sync/pull project code
-- run `npm install` and `npm run build`
-- write/patch `server/.env` (`HOST/PORT/CODEX_CWD`)
-- install and restart `systemd` service `/etc/systemd/system/codex-remoteapp.service`
-- generate/rewrite Nginx config for `NGINX_PATH` and reload Nginx
+### What deploy script does
 
-If your target already has another `/codex` route, existing configs containing `location /codex/` are backed up to `.bak.<timestamp>` and replaced automatically.
+- Pulls or clones repo
+- `npm install` and `npm run build`
+- Writes/patches `server/.env` (`HOST/PORT/CODEX_CWD`)
+- Installs/updates systemd unit `/etc/systemd/system/codex-remoteapp.service`
+- Generates/reloads Nginx config for reverse proxy path
+- Auto-replaces existing bindings on `/codex` (backed up as `.bak.<timestamp>`)
 
-If you only want code updates without touching Nginx config:
+Skip nginx config (code-only update):
 
 ```bash
 sudo SKIP_NGINX=1 bash scripts/deploy-remote.sh
 ```
+
+## Run in background
+
+```bash
+npm run restart
+```
+
+Defaults:
+
+- log: `/tmp/codex_remoteapp.log`
+- pid: `.codex_remoteapp.pid`
+- port: `PORT` from `server/.env` (fallback `18888`)
+
+Optional override:
+
+```bash
+CODEREMOTEAPP_LOG=/path/to/log npm run restart
+```
+
+## API Quick Reference
+
+- `GET /api/me`
+- `POST /api/chats` (create chat)
+- `GET /api/chats`
+- `GET /api/chats/:id`
+- `POST /api/chats/:id/send`
+- `GET /api/chats/:id/stream`
+- `POST /api/chats/:id/abort`
+- `POST /api/terminal`
+- `GET /api/terminals`
+- `POST /api/auth/otp/request`
+- `POST /api/auth/otp/verify`
+- `POST /api/auth/totp/verify`
+- `POST /api/auth/credential/login`
+- `POST /api/auth/credential`
+- `GET /api/auth/credentials`
+- `POST /api/auth/credential/revoke`
+
+And compatibility `Nginx path` endpoints are also available:
+
+- `POST /codex/api/terminal`
+- `GET /codex/api/terminals`
+
+## Notes
+
+- Requires local `codex` binary available in PATH (`codex --version`)
+- Approval policy examples: `never`, `on-request`, etc. (configured by env)
+- Chats and terminal sessions are session-scoped; terminal history is kept in memory by session map

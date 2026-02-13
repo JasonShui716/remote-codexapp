@@ -8,6 +8,8 @@ export type Session = {
   createdAt: number;
   expiresAt: number;
   activeChatId?: string;
+  createdBySessionId?: string;
+  createdByCredentialId?: string;
 };
 
 export type OtpChallenge = {
@@ -18,6 +20,19 @@ export type OtpChallenge = {
   attempts: number;
   lockedUntil?: number;
 };
+
+export type CredentialRecord = {
+  id: string;
+  tokenHash: string;
+  label?: string;
+  createdBySessionId: string;
+  createdAt: number;
+  lastUsedAt?: number;
+  usedCount?: number;
+  revokedAt?: number;
+};
+
+export type PublicCredentialRecord = Omit<CredentialRecord, 'tokenHash'>;
 
 export type ChatMessage = {
   id: string;
@@ -71,6 +86,7 @@ type PersistedStore = {
   savedAt: number;
   sessions: Session[];
   chatsBySession: { [sessionId: string]: Chat[] };
+  credentials: CredentialRecord[];
 };
 
 export class MemoryStore {
@@ -78,8 +94,11 @@ export class MemoryStore {
   private otpChallenges = new Map<string, OtpChallenge>();
   private chatsBySession = new Map<string, Map<string, Chat>>();
   private streamsByChatKey = new Map<string, ChatStream>();
+  private credentials = new Map<string, CredentialRecord>();
+  private credentialsByOwner = new Map<string, Set<string>>();
+  private credentialById = new Map<string, string>();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly persistenceVersion = 1;
+  private readonly persistenceVersion = 2;
   private persistencePath?: string;
 
   constructor(private opts: {
@@ -130,7 +149,8 @@ export class MemoryStore {
         sessions: Array.from(this.sessions.values()),
         chatsBySession: Object.fromEntries(
           Array.from(this.chatsBySession.entries()).map(([sid, chats]) => [sid, Array.from(chats.values())])
-        )
+        ),
+        credentials: Array.from(this.credentials.values())
       };
 
       const tmp = `${this.persistencePath}.tmp`;
@@ -162,6 +182,20 @@ export class MemoryStore {
       Array.isArray((v as Chat).messages) &&
       typeof (v as Chat).settings === 'object' &&
       (v as Chat).settings !== null
+    );
+  }
+
+  private isCredentialLike(v: unknown): v is CredentialRecord {
+    return (
+      typeof v === 'object' &&
+      v !== null &&
+      typeof (v as CredentialRecord).id === 'string' &&
+      typeof (v as CredentialRecord).tokenHash === 'string' &&
+      typeof (v as CredentialRecord).createdBySessionId === 'string' &&
+      typeof (v as CredentialRecord).createdAt === 'number' &&
+      (!(v as CredentialRecord).label || typeof (v as CredentialRecord).label === 'string') &&
+      (!(v as CredentialRecord).lastUsedAt || typeof (v as CredentialRecord).lastUsedAt === 'number') &&
+      (!(v as CredentialRecord).usedCount || Number.isInteger((v as CredentialRecord).usedCount as number))
     );
   }
 
@@ -240,6 +274,21 @@ export class MemoryStore {
           }
         }
       }
+
+      const rawCredentials = parsed.credentials;
+      if (rawCredentials && Array.isArray(rawCredentials)) {
+        for (const credentialValue of rawCredentials) {
+          if (!this.isCredentialLike(credentialValue)) continue;
+          if (credentialValue.revokedAt) continue;
+          const rec: CredentialRecord = {
+            ...credentialValue,
+            usedCount: typeof credentialValue.usedCount === 'number' ? credentialValue.usedCount : 0
+          };
+          this.credentials.set(rec.tokenHash, rec);
+          this.credentialById.set(rec.id, rec.tokenHash);
+          this.addCredentialOwner(rec.createdBySessionId, rec.id);
+        }
+      }
     } catch {
       // ignore bad/old/missing persistence file
     }
@@ -285,17 +334,50 @@ export class MemoryStore {
       }
     }
 
+    const credentialIds = Array.from(this.credentialById.keys());
+    for (const credentialId of credentialIds) {
+      const rec = this.getCredentialById(credentialId);
+      if (!rec) {
+        this.credentialsByOwner.forEach((set) => set.delete(credentialId));
+        this.credentialById.delete(credentialId);
+        changed = true;
+      }
+    }
+
     if (changed) this.markForPersist();
   }
 
-  createSession(): Session {
+  private addCredentialOwner(ownerSessionId: string, credentialId: string) {
+    let set = this.credentialsByOwner.get(ownerSessionId);
+    if (!set) {
+      set = new Set();
+      this.credentialsByOwner.set(ownerSessionId, set);
+    }
+    set.add(credentialId);
+  }
+
+  private removeCredentialOwner(ownerSessionId: string, credentialId: string) {
+    const set = this.credentialsByOwner.get(ownerSessionId);
+    if (!set) return;
+    set.delete(credentialId);
+    if (!set.size) this.credentialsByOwner.delete(ownerSessionId);
+  }
+
+  private getCredentialById(credentialId: string): CredentialRecord | null {
+    const tokenHash = this.credentialById.get(credentialId);
+    if (!tokenHash) return null;
+    return this.credentials.get(tokenHash) || null;
+  }
+
+  createSession(opts: { createdBySessionId?: string; createdByCredentialId?: string } = {}): Session {
     const createdAt = this.now();
     const id = nanoid(24);
     const session: Session = {
       id,
       createdAt,
       expiresAt: createdAt + this.opts.sessionTtlMs,
-      activeChatId: undefined
+      activeChatId: undefined,
+      ...opts
     };
     this.sessions.set(id, session);
     this.markForPersist();
@@ -324,6 +406,86 @@ export class MemoryStore {
     return session;
   }
 
+  createCredential(sessionId: string, label?: string): { token: string; id: string; createdAt: number; label?: string } {
+    let token = '';
+    let tokenHash = '';
+    do {
+      token = crypto.randomBytes(32).toString('base64url');
+      tokenHash = this.sha256Hex(token);
+    } while (this.credentials.has(tokenHash));
+
+    const now = this.now();
+    const rec: CredentialRecord = {
+      id: nanoid(10),
+      tokenHash,
+      label: label?.trim() || undefined,
+      createdBySessionId: sessionId,
+      createdAt: now,
+      usedCount: 0
+    };
+
+    this.credentials.set(tokenHash, rec);
+    this.credentialById.set(rec.id, tokenHash);
+    this.addCredentialOwner(sessionId, rec.id);
+    this.markForPersist();
+    return { token, id: rec.id, createdAt: now, label: rec.label };
+  }
+
+  listCredentialsForSession(sessionId: string): PublicCredentialRecord[] {
+    const ids = this.credentialsByOwner.get(sessionId);
+    if (!ids) return [];
+
+    const out: PublicCredentialRecord[] = [];
+    for (const id of ids) {
+      const rec = this.getCredentialById(id);
+      if (!rec) continue;
+      if (rec.createdBySessionId !== sessionId) continue;
+      if (rec.revokedAt) continue;
+      out.push({
+        id: rec.id,
+        label: rec.label,
+        createdBySessionId: rec.createdBySessionId,
+        createdAt: rec.createdAt,
+        lastUsedAt: rec.lastUsedAt,
+        usedCount: rec.usedCount
+      });
+    }
+    out.sort((a, b) => b.createdAt - a.createdAt);
+    return out;
+  }
+
+  consumeCredential(token: string): { ok: true; session: Session; credentialId: string } | { ok: false; error: string } {
+    const tokenHash = this.sha256Hex(token);
+    const rec = this.credentials.get(tokenHash);
+    if (!rec) return { ok: false, error: 'invalid_credential' };
+    if (rec.revokedAt) return { ok: false, error: 'revoked_credential' };
+
+    const now = this.now();
+    rec.lastUsedAt = now;
+    rec.usedCount = (rec.usedCount || 0) + 1;
+    this.credentials.set(tokenHash, rec);
+    this.markForPersist();
+
+    const session = this.createSession({
+      createdBySessionId: rec.createdBySessionId,
+      createdByCredentialId: rec.id
+    });
+    return { ok: true, session, credentialId: rec.id };
+  }
+
+  revokeCredential(sessionId: string, credentialId: string): boolean {
+    const rec = this.getCredentialById(credentialId);
+    if (!rec) return false;
+    if (rec.createdBySessionId !== sessionId) return false;
+    if (rec.revokedAt) return false;
+
+    rec.revokedAt = this.now();
+    this.credentials.set(rec.tokenHash, rec);
+    this.removeCredentialOwner(sessionId, rec.id);
+    this.markForPersist();
+    return true;
+  }
+
   getSession(id: string): Session | null {
     const s = this.sessions.get(id);
     if (!s) return null;
@@ -343,7 +505,9 @@ export class MemoryStore {
         id: s.id,
         createdAt: s.createdAt,
         expiresAt: s.expiresAt,
-        activeChatId: s.activeChatId
+        activeChatId: s.activeChatId,
+        createdBySessionId: s.createdBySessionId,
+        createdByCredentialId: s.createdByCredentialId
       }));
     const invalid = Array.from(this.sessions.keys()).filter((id) => !all.some((s) => s.id === id));
     if (invalid.length) {

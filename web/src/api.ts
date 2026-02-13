@@ -9,6 +9,7 @@ export type TerminalSession = {
   terminalId: string;
   cwd: string;
   createdAt: number;
+  status?: 'running' | 'stopped';
 };
 
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
@@ -29,6 +30,14 @@ export type Defaults = {
   approvalPolicy: string;
   modelOptions: ModelOption[];
   reasoningEffortOptions: ReasoningEffort[];
+};
+
+export type CredentialRecord = {
+  id: string;
+  label?: string;
+  createdAt: number;
+  lastUsedAt?: number;
+  usedCount?: number;
 };
 
 export type Chat = {
@@ -142,6 +151,77 @@ export async function totpVerify(code: string): Promise<{ ok: boolean; error?: s
   return await r.json();
 }
 
+export async function credentialLogin(credential: string): Promise<{ ok: boolean; sessionId?: string; error?: string }> {
+  let r = await fetch(apiUrl('/api/auth/credential/login'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ credential: credential.trim() })
+  });
+  if (!r.ok && r.status === 404 && API_PREFIX) {
+    r = await fetch('/api/auth/credential/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ credential: credential.trim() })
+    });
+  }
+  return await r.json();
+}
+
+export async function createCredential(label?: string): Promise<{
+  ok: boolean;
+  credential?: string;
+  credentialId?: string;
+  label?: string;
+  error?: string;
+}> {
+  let r = await fetch(apiUrl('/api/auth/credential'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ label: label?.trim() || undefined })
+  });
+  if (!r.ok && r.status === 404 && API_PREFIX) {
+    r = await fetch('/api/auth/credential', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ label: label?.trim() || undefined })
+    });
+  }
+  return await r.json();
+}
+
+export async function listCredentials(): Promise<CredentialRecord[]> {
+  let r = await fetch(apiUrl('/api/auth/credentials'), { credentials: 'include' });
+  if (!r.ok && r.status === 404 && API_PREFIX) {
+    r = await fetch('/api/auth/credentials', { credentials: 'include' });
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok || !Array.isArray(j.credentials)) throw new Error(j.error || 'failed');
+  return j.credentials as CredentialRecord[];
+}
+
+export async function revokeCredential(credentialId: string): Promise<void> {
+  let r = await fetch(apiUrl('/api/auth/credential/revoke'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ credentialId })
+  });
+  if (!r.ok && r.status === 404 && API_PREFIX) {
+    r = await fetch('/api/auth/credential/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ credentialId })
+    });
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) throw new Error(j.error || 'failed');
+}
+
 export async function logout(): Promise<void> {
   await fetch(apiUrl('/api/auth/logout'), {
     method: 'POST',
@@ -181,6 +261,22 @@ export async function createTerminal(cwd?: string): Promise<{ ok: boolean; termi
   if (!r.ok) return { ok: false, error: j.error || 'failed' };
   if (!j.ok) return { ok: false, error: j.error || 'failed' };
   return j as { ok: boolean; terminal?: TerminalSession; error?: string };
+}
+
+export async function listTerminals(): Promise<TerminalSession[]> {
+  let r = await fetch(apiUrl('/api/terminals'), { credentials: 'include' });
+  const looksLikeJson = (res: Response) => (res.headers.get('content-type') || '').toLowerCase().includes('application/json');
+
+  if (!looksLikeJson(r) && API_PREFIX) {
+    const fallback = await fetch('/api/terminals', { credentials: 'include' });
+    if (looksLikeJson(fallback)) r = fallback;
+  }
+  if (!r.ok && r.status === 404 && API_PREFIX) {
+    r = await fetch('/api/terminals', { credentials: 'include' });
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok || !Array.isArray(j.terminals)) throw new Error(j.error || 'failed');
+  return j.terminals as TerminalSession[];
 }
 
 export async function deleteChat(chatId: string): Promise<void> {

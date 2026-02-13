@@ -916,6 +916,16 @@ function getSessionId(req: express.Request): string | null {
   return s.id;
 }
 
+function setSessionCookie(res: express.Response, sid: string) {
+  res.cookie('sid', sid, {
+    httpOnly: true,
+    sameSite: 'lax',
+    signed: true,
+    secure: false, // set true behind HTTPS
+    maxAge: env.SESSION_TTL_MS
+  });
+}
+
 function requireAuth(req: express.Request, res: express.Response): string | null {
   const sid = getSessionId(req);
   if (!sid) {
@@ -957,6 +967,18 @@ app.get('/api/auth/totp/uri', (_req, res) => {
 
   const uri = authenticator.keyuri(env.TOTP_ACCOUNT, env.TOTP_ISSUER, env.TOTP_SECRET);
   res.json({ ok: true, uri });
+});
+
+const CreateCredentialSchema = z.object({
+  label: z.string().trim().max(80).optional()
+});
+
+const CredentialLoginSchema = z.object({
+  credential: z.string().trim().min(8)
+});
+
+const RevokeCredentialSchema = z.object({
+  credentialId: z.string().min(1)
 });
 
 app.get('/api/me', (req, res) => {
@@ -1267,13 +1289,7 @@ app.post('/api/auth/otp/verify', (req, res) => {
   }
 
   const session = store.createSession();
-  res.cookie('sid', session.id, {
-    httpOnly: true,
-    sameSite: 'lax',
-    signed: true,
-    secure: false, // set true behind HTTPS
-    maxAge: env.SESSION_TTL_MS
-  });
+  setSessionCookie(res, session.id);
 
   res.json({ ok: true, sessionId: session.id, expiresInMs: env.SESSION_TTL_MS });
 });
@@ -1312,15 +1328,75 @@ app.post('/api/auth/totp/verify', (req, res) => {
     return `totp_${h}`;
   })();
   const session = store.getOrCreateSessionWithId(fixedSid);
-  res.cookie('sid', session.id, {
-    httpOnly: true,
-    sameSite: 'lax',
-    signed: true,
-    secure: false,
-    maxAge: env.SESSION_TTL_MS
-  });
+  setSessionCookie(res, session.id);
   res.json({ ok: true, sessionId: session.id, expiresInMs: env.SESSION_TTL_MS });
 });
+
+const createCredentialHandler = (req: express.Request, res: express.Response) => {
+  const sid = requireAuth(req, res);
+  if (!sid) return;
+
+  const parsed = CreateCredentialSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: 'bad_request' });
+  }
+
+  const result = store.createCredential(sid, parsed.data.label);
+  res.json({
+    ok: true,
+    credential: result.token,
+    credentialId: result.id,
+    createdAt: result.createdAt,
+    label: result.label
+  });
+};
+
+const credentialLoginHandler = (req: express.Request, res: express.Response) => {
+  const parsed = CredentialLoginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: 'bad_request' });
+  }
+
+  const r = store.consumeCredential(parsed.data.credential);
+  if (!r.ok) {
+    return res.status(401).json({ ok: false, error: r.error });
+  }
+
+  setSessionCookie(res, r.session.id);
+  res.json({
+    ok: true,
+    sessionId: r.session.id,
+    credentialId: r.credentialId,
+    expiresInMs: env.SESSION_TTL_MS
+  });
+};
+
+const listCredentialsHandler = (req: express.Request, res: express.Response) => {
+  const sid = requireAuth(req, res);
+  if (!sid) return;
+  res.json({ ok: true, credentials: store.listCredentialsForSession(sid) });
+};
+
+const revokeCredentialHandler = (req: express.Request, res: express.Response) => {
+  const sid = requireAuth(req, res);
+  if (!sid) return;
+
+  const parsed = RevokeCredentialSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'bad_request' });
+
+  const ok = store.revokeCredential(sid, parsed.data.credentialId);
+  if (!ok) return res.status(404).json({ ok: false, error: 'not_found' });
+  res.json({ ok: true });
+};
+
+app.post('/api/auth/credential', createCredentialHandler);
+app.post('/codex/api/auth/credential', createCredentialHandler);
+app.post('/api/auth/credential/login', credentialLoginHandler);
+app.post('/codex/api/auth/credential/login', credentialLoginHandler);
+app.get('/api/auth/credentials', listCredentialsHandler);
+app.get('/codex/api/auth/credentials', listCredentialsHandler);
+app.post('/api/auth/credential/revoke', revokeCredentialHandler);
+app.post('/codex/api/auth/credential/revoke', revokeCredentialHandler);
 
 app.post('/api/auth/logout', (req, res) => {
   res.clearCookie('sid');
@@ -1362,8 +1438,26 @@ const createTerminalHandler = (req: express.Request, res: express.Response) => {
   });
 };
 
+const listTerminalsHandler = (req: express.Request, res: express.Response) => {
+  const sid = requireAuth(req, res);
+  if (!sid) return;
+
+  const list = terminalSessionsBySid.get(sid) || [];
+  res.json({
+    ok: true,
+    terminals: list.map((terminal) => ({
+      terminalId: terminal.id,
+      cwd: terminal.cwd,
+      createdAt: terminal.createdAt,
+      status: terminal.status
+    }))
+  });
+};
+
 app.post('/api/terminal', createTerminalHandler);
 app.post('/codex/api/terminal', createTerminalHandler);
+app.get('/api/terminals', listTerminalsHandler);
+app.get('/codex/api/terminals', listTerminalsHandler);
 
 app.get('/api/chats', (req, res) => {
   const sid = requireAuth(req, res);

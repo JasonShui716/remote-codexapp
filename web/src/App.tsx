@@ -7,7 +7,9 @@ import {
   apiUrl,
   approveTool,
   createChat,
+  createCredential,
   createTerminal,
+  credentialLogin,
   deleteChat,
   fsMkdir,
   fsLs,
@@ -16,6 +18,9 @@ import {
   getChat,
   getChatRuntime,
   getDefaults,
+  listCredentials,
+  revokeCredential as revokeCredentialApi,
+  listTerminals,
   listChats,
   getStatus,
   getTotpStatus,
@@ -30,7 +35,9 @@ import {
   updateChatSettings,
   type ChatMessage,
   type Defaults,
+  type CredentialRecord,
   type ModelOption,
+  type TerminalSession,
   type ReasoningEffort
 } from './api';
 
@@ -189,6 +196,10 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
   const [showTotpSetup, setShowTotpSetup] = useState(false);
   const [totpProvisioned, setTotpProvisioned] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [credential, setCredential] = useState('');
+  const [credentialStatus, setCredentialStatus] = useState('');
+  const [credentialStatusKind, setCredentialStatusKind] = useState<'info' | 'error' | 'success'>('info');
+  const [credentialBusy, setCredentialBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -251,6 +262,31 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
     }
   };
 
+  const doCredentialLogin = async () => {
+    const c = credential.trim();
+    if (!c || credentialBusy) return;
+    setCredentialBusy(true);
+    setCredentialStatus('Verifying credential...');
+    setCredentialStatusKind('info');
+    try {
+      const r = await credentialLogin(c);
+      if (r.ok) {
+        setCredentialStatus('Login successful.');
+        setCredentialStatusKind('success');
+        setCredential('');
+        await props.onAuthed();
+      } else {
+        setCredentialStatus(`Credential login failed: ${r.error || 'invalid credential'}`);
+        setCredentialStatusKind('error');
+      }
+    } catch (e: any) {
+      setCredentialStatus(`Credential login failed: ${String(e?.message || e)}`);
+      setCredentialStatusKind('error');
+    } finally {
+      setCredentialBusy(false);
+    }
+  };
+
   const doTotpSetup = async () => {
     if (busy || totpProvisioned) return;
     setShowTotpSetup(true);
@@ -277,6 +313,35 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
         <div className="title">Codex Web Chat</div>
         <div className="subtitle">
           {mode === 'otp' ? 'OTP login (server logs the code)' : 'TOTP login (scan once in an authenticator app)'}
+        </div>
+
+        <div className="setup">
+          <div className="subtitle">Credential login</div>
+          <div className="row">
+            <input
+              className="input"
+              placeholder="Paste credential token"
+              value={credential}
+              onChange={(e) => {
+                setCredential(e.target.value);
+                if (credentialStatus) setCredentialStatus('');
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void doCredentialLogin();
+                }
+              }}
+            />
+            <button className="btn" disabled={credentialBusy || !credential.trim()} onClick={() => void doCredentialLogin()}>
+              {credentialBusy ? 'Logging in...' : 'Login with credential'}
+            </button>
+          </div>
+          {credentialStatus ? (
+            <div className={`status ${credentialStatusKind === 'error' ? 'status-error' : credentialStatusKind === 'success' ? 'status-success' : ''}`}>
+              {credentialStatus}
+            </div>
+          ) : null}
         </div>
 
         {mode === 'totp' && !totpProvisioned ? (
@@ -398,10 +463,16 @@ function Login(props: { onAuthed: () => void | Promise<void> }) {
 
 function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId: string) => void | Promise<void>; onLogout: () => void | Promise<void> }) {
   const [chatList, setChatList] = useState<{ id: string; updatedAt: number; createdAt: number; preview?: string }[]>([]);
+  const [terminalList, setTerminalList] = useState<TerminalSession[]>([]);
+  const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
+  const [credentialListBusy, setCredentialListBusy] = useState(false);
   const [chatListBusy, setChatListBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [composing, setComposing] = useState(false);
+  const [credentialInput, setCredentialInput] = useState('');
+  const [creatingCredential, setCreatingCredential] = useState(false);
+  const [createdCredential, setCreatedCredential] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [approval, setApproval] = useState<{ id: string; message?: string; command?: string[]; cwd?: string } | null>(null);
@@ -437,6 +508,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
   const pollTimerRef = useRef<number | null>(null);
   const startTurnRef = useRef<boolean>(false);
   const busyRef = useRef<boolean>(false);
+  const terminalListRefreshSeqRef = useRef(0);
 
   useEffect(() => {
     const mq = window.matchMedia('(max-width: 760px)');
@@ -450,17 +522,84 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
     if (!isMobileLayout) setMobileChatListOpen(false);
   }, [isMobileLayout]);
 
+  const refreshTerminals = async () => {
+    const seq = ++terminalListRefreshSeqRef.current;
+    try {
+      const terminalResult = await listTerminals();
+      if (seq !== terminalListRefreshSeqRef.current) return [];
+      setTerminalList(terminalResult);
+      return terminalResult;
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  };
+
   const refreshChatList = async () => {
+    let chats: { id: string; updatedAt: number; createdAt: number; preview?: string }[] = [];
     try {
       setChatListBusy(true);
-      const chats = await listChats();
+      const chatResult = await listChats();
+      void refreshTerminals();
+      chats = chatResult;
       setChatList(chats);
-      return chats;
-    } catch {
+    } catch (e) {
       // ignore list refresh errors
-      return [];
+      console.error(e);
     } finally {
       setChatListBusy(false);
+    }
+    return chats;
+  };
+
+  const refreshCredentials = async () => {
+    try {
+      setCredentialListBusy(true);
+      const list = await listCredentials();
+      setCredentials(list);
+    } catch {
+      // ignore list refresh errors
+    } finally {
+      setCredentialListBusy(false);
+    }
+  };
+
+  const createCredentialNow = async () => {
+    if (creatingCredential) return;
+    setCreatedCredential('');
+    setCreatingCredential(true);
+    try {
+      const r = await createCredential(credentialInput.trim() || undefined);
+      if (!r.ok || !r.credential) {
+        setErr(r.error || 'create_credential_failed');
+        return;
+      }
+      setCreatedCredential(r.credential);
+      setCredentialInput('');
+      await refreshCredentials();
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setCreatingCredential(false);
+    }
+  };
+
+  const revokeCredential = async (credentialId: string) => {
+    if (!window.confirm('Revoke this credential?')) return;
+    try {
+      await revokeCredentialApi(credentialId);
+      await refreshCredentials();
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    }
+  };
+
+  const copyCredentialToClipboard = async (value: string) => {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch (e: any) {
+      setErr(String(e?.message || e));
     }
   };
 
@@ -508,7 +647,20 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
       }
 
       const terminal = r.terminal;
+      setTerminalList((prev) => {
+        const cleaned = prev.filter((item) => item.terminalId !== terminal.terminalId);
+        return [
+          {
+            terminalId: terminal.terminalId,
+            cwd: terminal.cwd || defaults?.cwd || '',
+            createdAt: terminal.createdAt || nowTs(),
+            status: terminal.status
+          },
+          ...cleaned
+        ].slice(0, 20);
+      });
       addSystem(`Terminal created: ${terminal.terminalId} (cwd=${terminal.cwd || 'default'})`);
+      void refreshTerminals();
     } catch (e: any) {
       setErr(String(e?.message || e));
     }
@@ -684,6 +836,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
       setReasoningEffortInput(asReasoningEffort(savedSettings.reasoningEffort));
       setCwdInput(savedSettings.cwd || '');
       void refreshChatList();
+      void refreshCredentials();
 
       const d = await getDefaults().catch(() => ({ ok: false } as any));
       if (!cancelled && d.ok && d.defaults) {
@@ -947,6 +1100,17 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
     if (preview) return preview.slice(0, 42);
     return new Date(chat.updatedAt).toLocaleTimeString();
   };
+  const terminalOptionLabel = (terminal: TerminalSession) => {
+    const name = terminal.terminalId.slice(0, 10);
+    const cwd = terminal.cwd || 'default';
+    return `${name}  ${cwd}`;
+  };
+  const credentialOptionLabel = (credential: CredentialRecord) => {
+    const label = credential.label?.trim();
+    const usage = credential.usedCount ? `used ${credential.usedCount}x` : 'unused';
+    const meta = [label || credential.id, usage].filter(Boolean).join(' · ');
+    return meta;
+  };
 
   const modelOptions = defaults?.modelOptions || [];
   const modelInputTrimmed = modelInput.trim();
@@ -980,31 +1144,121 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
             ) : null}
           </div>
           <div className="session-tabs-scroll">
-            {chatList.length === 0 ? (
+            {chatList.length === 0 && terminalList.length === 0 ? (
               <div className="session-tab session-tab-empty">No sessions</div>
+            ) : null}
+            {chatList.length > 0 ? chatList.map((chat) => (
+              <div key={chat.id} className="session-tab-row">
+                <button
+                  className={`session-tab ${chat.id === props.chatId ? 'active' : ''}`}
+                  disabled={chatListBusy}
+                  type="button"
+                  title={chatOptionLabel(chat)}
+                  onClick={() => selectChat(chat.id)}
+                >
+                  <span className="session-tab-id">{chat.id.slice(0, 6)}</span>
+                  <span className="session-tab-preview">{sessionTabLabel(chat)}</span>
+                </button>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  type="button"
+                  disabled={chatListBusy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void removeChat(chat.id);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            )) : null}
+            {terminalList.length > 0 ? (
+              <>
+                <div className="session-tab session-tab-empty" style={{ margin: '6px 0 2px' }}>
+                  Terminal sessions
+                </div>
+                {terminalList.map((terminal) => (
+                  <div key={terminal.terminalId} className="session-tab-row">
+                    <button
+                      className="session-tab"
+                      type="button"
+                      disabled={chatListBusy}
+                      title={terminalOptionLabel(terminal)}
+                      onClick={() => addSystem(`Terminal ${terminal.terminalId} (${terminal.status || 'running'}) cwd=${terminal.cwd || 'default'}`)}
+                    >
+                      <span className="session-tab-id">{terminal.terminalId.slice(0, 6)}</span>
+                      <span className="session-tab-preview">{terminalOptionLabel(terminal)}</span>
+                    </button>
+                  </div>
+                ))}
+              </>
+            ) : null}
+            <div className="session-tab session-tab-empty" style={{ margin: '10px 0 4px' }}>
+              Access credentials
+            </div>
+            <div className="session-switch">
+              <input
+                className="input input-sm"
+                placeholder="Credential label (optional)"
+                value={credentialInput}
+                disabled={creatingCredential || credentialListBusy}
+                onChange={(e) => setCredentialInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void createCredentialNow();
+                  }
+                }}
+              />
+              <button
+                className="btn btn-secondary btn-sm"
+                disabled={creatingCredential || credentialListBusy}
+                onClick={() => void createCredentialNow()}
+              >
+                {creatingCredential ? 'Creating...' : 'Create'}
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                disabled={credentialListBusy}
+                onClick={() => void refreshCredentials()}
+              >
+                Reload
+              </button>
+            </div>
+            {createdCredential ? (
+              <div className="status status-success" style={{ margin: '4px 6px 8px', wordBreak: 'break-all' }}>
+                New credential:
+                <div className="session-tab-preview" style={{ marginTop: 4 }}>{createdCredential}</div>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  style={{ marginTop: 6 }}
+                  onClick={() => void copyCredentialToClipboard(createdCredential)}
+                >
+                  Copy
+                </button>
+              </div>
+            ) : null}
+            {credentials.length === 0 ? (
+              <div className="session-tab session-tab-empty">No credentials</div>
             ) : (
-              chatList.map((chat) => (
-                <div key={chat.id} className="session-tab-row">
+              credentials.map((credential) => (
+                <div key={credential.id} className="session-tab-row">
                   <button
-                    className={`session-tab ${chat.id === props.chatId ? 'active' : ''}`}
-                    disabled={chatListBusy}
+                    className="session-tab"
                     type="button"
-                    title={chatOptionLabel(chat)}
-                    onClick={() => selectChat(chat.id)}
+                    disabled={credentialListBusy}
+                    title={credentialOptionLabel(credential)}
                   >
-                    <span className="session-tab-id">{chat.id.slice(0, 6)}</span>
-                    <span className="session-tab-preview">{sessionTabLabel(chat)}</span>
+                    <span className="session-tab-id">{credential.id.slice(0, 6)}</span>
+                    <span className="session-tab-preview">{credentialOptionLabel(credential)}</span>
                   </button>
                   <button
                     className="btn btn-secondary btn-sm"
                     type="button"
-                    disabled={chatListBusy}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void removeChat(chat.id);
-                    }}
+                    disabled={credentialListBusy}
+                    onClick={() => void revokeCredential(credential.id)}
                   >
-                    Delete
+                    Revoke
                   </button>
                 </div>
               ))
