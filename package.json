@@ -1,0 +1,15 @@
+{
+  "name": "codex-remoteapp",
+  "private": true,
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm -w web run build",
+    "dev": "npm run build && npm -w server run dev",
+    "start": "npm run build && npm -w server start",
+    "restart": "bash ./scripts/restart.sh",
+    "deploy": "bash ./scripts/deploy-remote.sh"
+  }
+}
