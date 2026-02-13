@@ -151,7 +151,7 @@ server {
   }
 
   location ${path}/ {
-    rewrite ^${path}/(.*)$ /$1 break;
+    rewrite ^${path}/(.*)$ /\$1 break;
     proxy_pass http://127.0.0.1:${port};
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
@@ -304,8 +304,15 @@ if [[ "$SKIP_SERVICE" != "1" ]]; then
   ensure_root_cmd
   SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
   NPM_BIN="$(run_as_app_user bash -lc 'command -v npm')"
+  NODE_BIN="$(run_as_app_user bash -lc 'command -v node')"
+  NODE_BIN_DIR="$(dirname "${NODE_BIN}")"
+  SERVICE_PATH="${NODE_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   if [[ -z "${NPM_BIN}" ]]; then
     echo "npm not found for user ${APP_USER}" >&2
+    exit 1
+  fi
+  if [[ -z "${NODE_BIN}" ]]; then
+    echo "node not found for user ${APP_USER}" >&2
     exit 1
   fi
   cat > /tmp/"${SERVICE_NAME}.service" <<EOF
@@ -319,6 +326,7 @@ User=${APP_USER}
 Group=${APP_GROUP}
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${ENV_FILE}
+Environment=PATH=${SERVICE_PATH}
 Restart=always
 RestartSec=3
 ExecStart=${NPM_BIN} start
