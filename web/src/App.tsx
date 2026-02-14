@@ -52,6 +52,7 @@ const REASONING_DEFAULT_VALUE = '__default__';
 const REASONING_VALUES: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
 const LOCKED_SANDBOX = 'danger-full-access';
 const LOCKED_APPROVAL_POLICY = 'never';
+const QUEUED_PROMPTS_KEY_PREFIX = 'codex:queuedPrompts:';
 const AGENT_PROMPT_TEMPLATE = `你不是被动回答问题的助手，而是一个【自主执行的任务型 agent】。
 你的目标不是“给建议”，而是【把事情真正完成】。
 
@@ -107,6 +108,38 @@ function asReasoningEffort(v: unknown): ReasoningEffort | '' {
 
 function normalizeStreamText(v: string): string {
   return v.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function queuedPromptsStorageKey(sid: string, chatId: string) {
+  return `${QUEUED_PROMPTS_KEY_PREFIX}${sid}:${chatId}`;
+}
+
+function loadQueuedPrompts(sid: string, chatId: string): string[] {
+  if (!sid || !chatId) return [];
+  try {
+    const raw = window.localStorage.getItem(queuedPromptsStorageKey(sid, chatId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => (typeof item === 'string' ? item : ''))
+      .filter((item): item is string => item.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function saveQueuedPrompts(sid: string, chatId: string, prompts: string[]) {
+  if (!sid || !chatId) return;
+  try {
+    if (!prompts.length) {
+      window.localStorage.removeItem(queuedPromptsStorageKey(sid, chatId));
+      return;
+    }
+    window.localStorage.setItem(queuedPromptsStorageKey(sid, chatId), JSON.stringify(prompts.slice(0, 200)));
+  } catch {
+    // ignore localStorage failures
+  }
 }
 
 export default function App() {
@@ -848,13 +881,17 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
   }, [busy]);
 
   useEffect(() => {
+    saveQueuedPrompts(props.sessionId, props.chatId, queuedPrompts);
+  }, [props.sessionId, props.chatId, queuedPrompts]);
+
+  useEffect(() => {
     let cancelled = false;
     (async () => {
       setErr(null);
       setBusy(false);
       setApproval(null);
       setStreamStatus('connected');
-      setQueuedPrompts([]);
+      setQueuedPrompts(loadQueuedPrompts(props.sessionId, props.chatId));
       setRenderCount(INITIAL_RENDER_COUNT);
       setRuntimeStatus('');
       setRuntimeLastEventId(0);
