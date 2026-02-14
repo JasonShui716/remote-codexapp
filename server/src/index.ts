@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './bootstrapEnv.js';
 
 import express from 'express';
 import cors from 'cors';
@@ -20,14 +20,14 @@ import { readEnv } from './config.js';
 import { MemoryStore, type StreamEvent } from './store.js';
 import { SessiondClient } from './sessiondClient.js';
 
+const serverRootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const env = readEnv();
 
 const store = new MemoryStore({
   sessionTtlMs: env.SESSION_TTL_MS,
-  persistencePath: path.resolve(process.cwd(), env.DATA_DIR, 'store.json')
+  persistencePath: path.resolve(serverRootDir, env.DATA_DIR, 'store.json')
 });
 
-const serverRootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const codex = new SessiondClient({
   baseUrl: `http://${env.CODEX_SESSIOND_HOST}:${env.CODEX_SESSIOND_PORT}`,
   autoStart: env.CODEX_SESSIOND_AUTO_START,
@@ -1043,7 +1043,7 @@ const codexReasoningEffortOptions = uniqueReasoningEfforts(
 // After that, QR/URI should not be retrievable or printed again.
 const totpProvisionPath = path.isAbsolute(env.TOTP_PROVISION_FILE)
   ? env.TOTP_PROVISION_FILE
-  : path.resolve(process.cwd(), env.TOTP_PROVISION_FILE);
+  : path.resolve(serverRootDir, env.TOTP_PROVISION_FILE);
 
 function isTotpProvisioned(): boolean {
   try {
@@ -1991,7 +1991,7 @@ app.post('/api/chats/:chatId/approve', async (req, res) => {
 });
 
 // Serve built web app if present.
-const webDist = path.resolve(process.cwd(), '..', 'web', 'dist');
+const webDist = path.resolve(serverRootDir, '..', 'web', 'dist');
 if (fs.existsSync(webDist)) {
   app.use(express.static(webDist));
   app.get('*', (_req, res) => {

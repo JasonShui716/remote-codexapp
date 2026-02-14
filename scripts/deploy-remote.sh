@@ -13,6 +13,7 @@ APP_USER="${APP_USER:-${SUDO_USER:-$(id -un)}}"
 APP_GROUP="${APP_GROUP:-${APP_USER}}"
 SKIP_NGINX="${SKIP_NGINX:-0}"
 SKIP_SERVICE="${SKIP_SERVICE:-0}"
+ENSURE_ENV_ONLY="${ENSURE_ENV_ONLY:-0}"
 
 SCRIPT_NAME="$(basename "$0")"
 
@@ -30,6 +31,7 @@ Quick deploy + install:
   --user <name>      Service run user (default: ${APP_USER})
   --skip-nginx       Skip nginx config/reload
   --skip-service     Skip systemd service install/restart
+  --ensure-env-only  Only ensure server/.env values (generate TOTP_SECRET if missing), then exit
   -h, --help         Show help
 
 Examples:
@@ -110,16 +112,13 @@ read_env_value() {
 }
 
 generate_base32_secret() {
-  tr -dc 'A-Z2-7' </dev/urandom | head -c 32
+  # With `set -o pipefail`, `tr` can exit 141 (SIGPIPE) after `head` closes the pipe.
+  # Disable pipefail for this pipeline so secret generation is reliable.
+  (set +o pipefail; tr -dc 'A-Z2-7' </dev/urandom | head -c 32)
 }
 
 ensure_totp_secret_if_needed() {
   local env_file="$1"
-  local mode
-  mode="$(read_env_value "$env_file" "AUTH_MODE")"
-  if [[ "$mode" != "totp" ]]; then
-    return
-  fi
 
   local secret
   secret="$(read_env_value "$env_file" "TOTP_SECRET")"
@@ -130,7 +129,7 @@ ensure_totp_secret_if_needed() {
   local generated
   generated="$(generate_base32_secret)"
   ensure_env_value "$env_file" "TOTP_SECRET" "$generated"
-  log "Generated TOTP_SECRET for AUTH_MODE=totp."
+  log "Generated TOTP_SECRET (was missing/empty)."
 
   local marker_rel
   marker_rel="$(read_env_value "$env_file" "TOTP_PROVISION_FILE")"
@@ -139,7 +138,7 @@ ensure_totp_secret_if_needed() {
   if [[ "$marker_rel" = /* ]]; then
     marker_path="$marker_rel"
   else
-    marker_path="${APP_DIR}/server/${marker_rel}"
+    marker_path="$(cd "$(dirname "$env_file")" && pwd)/${marker_rel}"
   fi
   rm -f "$marker_path"
 }
@@ -316,6 +315,12 @@ while [[ $# -gt 0 ]]; do
       SKIP_SERVICE=1
       shift
       ;;
+    --ensure-env-only)
+      ENSURE_ENV_ONLY=1
+      SKIP_NGINX=1
+      SKIP_SERVICE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -343,7 +348,9 @@ if [[ "$SKIP_NGINX" != "1" && -z "${DOMAIN}" ]]; then
   fi
 fi
 
-require_cmd git
+if [[ "$ENSURE_ENV_ONLY" != "1" ]]; then
+  require_cmd git
+fi
 if [[ "$SKIP_SERVICE" != "1" ]]; then
   require_cmd systemctl
 fi
@@ -354,6 +361,26 @@ fi
 
 APP_DIR="${APP_DIR%/}"
 ENV_FILE="${APP_DIR}/server/.env"
+
+if [[ "$ENSURE_ENV_ONLY" == "1" ]]; then
+  if [[ ! -f "${APP_DIR}/server/.env.example" ]]; then
+    echo "Missing ${APP_DIR}/server/.env.example (APP_DIR must point at an existing checkout for --ensure-env-only)" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    cp "${APP_DIR}/server/.env.example" "$ENV_FILE"
+  fi
+
+  ensure_env_value "$ENV_FILE" "HOST" "127.0.0.1"
+  ensure_env_value "$ENV_FILE" "PORT" "$APP_PORT"
+  ensure_env_value "$ENV_FILE" "CODEX_CWD" "$APP_DIR"
+  ensure_totp_secret_if_needed "$ENV_FILE"
+
+  log "Ensured env file: $ENV_FILE"
+  log "Done (ensure-env-only)."
+  exit 0
+fi
 
 if ! id "${APP_USER}" >/dev/null 2>&1; then
   echo "Service/build user not found: ${APP_USER}" >&2
@@ -397,9 +424,6 @@ else
   run_as_app_user git clone --depth 1 --branch "$GIT_BRANCH" "$REPO_URL" "$APP_DIR"
 fi
 
-log "Installing dependencies and building web bundle"
-run_as_app_user bash -lc "cd '$APP_DIR' && npm install && npm run build"
-
 if [[ ! -f "$ENV_FILE" ]]; then
   cp "$APP_DIR/server/.env.example" "$ENV_FILE"
 fi
@@ -408,6 +432,9 @@ ensure_env_value "$ENV_FILE" "HOST" "127.0.0.1"
 ensure_env_value "$ENV_FILE" "PORT" "$APP_PORT"
 ensure_env_value "$ENV_FILE" "CODEX_CWD" "$APP_DIR"
 ensure_totp_secret_if_needed "$ENV_FILE"
+
+log "Installing dependencies and building web bundle"
+run_as_app_user bash -lc "cd '$APP_DIR' && npm install && npm run build"
 
 if [[ "$SKIP_SERVICE" != "1" ]]; then
   ensure_root_cmd

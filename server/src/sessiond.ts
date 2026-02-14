@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './bootstrapEnv.js';
 
 import express from 'express';
 import { z } from 'zod';
