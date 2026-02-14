@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Local backup created during iOS project generation.
+ios_spm_backup_*
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

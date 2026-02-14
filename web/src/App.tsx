@@ -53,6 +53,10 @@ const REASONING_VALUES: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
 const LOCKED_SANDBOX = 'danger-full-access';
 const LOCKED_APPROVAL_POLICY = 'never';
 const QUEUED_PROMPTS_KEY_PREFIX = 'codex:queuedPrompts:';
+const INSTANCE_OPTIONS: { label: string; origin: string; path: string }[] = [
+  { label: 'conknow.cc', origin: 'https://conknow.cc', path: '/codex' },
+  { label: 'conknow.app', origin: 'https://www.conknow.app', path: '/codex' }
+];
 const AGENT_PROMPT_TEMPLATE = `你不是被动回答问题的助手，而是一个【自主执行的任务型 agent】。
 你的目标不是“给建议”，而是【把事情真正完成】。
 
@@ -139,6 +143,14 @@ function saveQueuedPrompts(sid: string, chatId: string, prompts: string[]) {
     window.localStorage.setItem(queuedPromptsStorageKey(sid, chatId), JSON.stringify(prompts.slice(0, 200)));
   } catch {
     // ignore localStorage failures
+  }
+}
+
+function currentInstanceOrigin(): string {
+  try {
+    return window.location.origin || '';
+  } catch {
+    return '';
   }
 }
 
@@ -469,7 +481,21 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
   const [streamErrorAt, setStreamErrorAt] = useState<number>(0);
   const [uiNow, setUiNow] = useState<number>(0);
   const [streamStatus, setStreamStatus] = useState<'connected' | 'reconnecting'>('connected');
-  const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
+  type QueueState = { sid: string; chatId: string; prompts: string[] };
+  const [queueState, setQueueState] = useState<QueueState>(() => ({
+    sid: props.sessionId,
+    chatId: props.chatId,
+    prompts: loadQueuedPrompts(props.sessionId, props.chatId)
+  }));
+  // Keep the rest of the component using the old `queuedPrompts` / `setQueuedPrompts` shape.
+  const queuedPrompts =
+    queueState.sid === props.sessionId && queueState.chatId === props.chatId ? queueState.prompts : [];
+  const setQueuedPrompts = (next: string[] | ((prev: string[]) => string[])) => {
+    setQueueState((prev) => {
+      const prompts = typeof next === 'function' ? (next as (p: string[]) => string[])(prev.prompts) : next;
+      return { ...prev, prompts };
+    });
+  };
   const [mobileChatListOpen, setMobileChatListOpen] = useState(false);
   const [isMobileLayout, setIsMobileLayout] = useState(false);
 
@@ -881,8 +907,10 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
   }, [busy]);
 
   useEffect(() => {
-    saveQueuedPrompts(props.sessionId, props.chatId, queuedPrompts);
-  }, [props.sessionId, props.chatId, queuedPrompts]);
+    // Important: save to the queue's owner (sid/chatId) carried with the prompts state.
+    // This prevents cross-chat "sync" when props.chatId changes but state hasn't been hydrated yet.
+    saveQueuedPrompts(queueState.sid, queueState.chatId, queueState.prompts);
+  }, [queueState.sid, queueState.chatId, queueState.prompts]);
 
   useEffect(() => {
     let cancelled = false;
@@ -891,7 +919,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
       setBusy(false);
       setApproval(null);
       setStreamStatus('connected');
-      setQueuedPrompts(loadQueuedPrompts(props.sessionId, props.chatId));
+      setQueueState({ sid: props.sessionId, chatId: props.chatId, prompts: loadQueuedPrompts(props.sessionId, props.chatId) });
       setRenderCount(INITIAL_RENDER_COUNT);
       setRuntimeStatus('');
       setRuntimeLastEventId(0);
@@ -1249,6 +1277,25 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
     return `${name}  ${cwd}`;
   };
   const isTerminalView = Boolean(activeTerminal);
+  const instanceValue = INSTANCE_OPTIONS.some((o) => o.origin === currentInstanceOrigin())
+    ? currentInstanceOrigin()
+    : '';
+  const switchInstance = (nextOrigin: string) => {
+    const opt = INSTANCE_OPTIONS.find((o) => o.origin === nextOrigin);
+    if (!opt) return;
+    const target = `${opt.origin}${opt.path}`;
+    if (target === `${window.location.origin}${window.location.pathname.replace(/\/+$/, '')}`) return;
+
+    const dirty =
+      Boolean(busy) ||
+      (queueState.sid === props.sessionId && queueState.chatId === props.chatId && queueState.prompts.length > 0) ||
+      (!isTerminalView && text.trim().length > 0);
+    if (dirty) {
+      const ok = window.confirm('切换实例会中断当前运行/丢失未发送内容，确定切换吗？');
+      if (!ok) return;
+    }
+    window.location.assign(target);
+  };
 
   const modelOptions = defaults?.modelOptions || [];
   const modelInputTrimmed = modelInput.trim();
@@ -1390,6 +1437,22 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
               </div>
             ) : null}
             <div className="spacer" />
+            <select
+              className="input input-sm"
+              style={{ flex: '0 0 auto', minWidth: 160 }}
+              value={instanceValue}
+              onChange={(e) => switchInstance(e.target.value)}
+              title="Switch instance"
+            >
+              <option value="" disabled>
+                Instance
+              </option>
+              {INSTANCE_OPTIONS.map((o) => (
+                <option key={o.origin} value={o.origin}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
             {!isTerminalView ? (
               <button className="btn btn-secondary btn-sm" onClick={() => setControlsOpen((v) => !v)}>
                 Settings
