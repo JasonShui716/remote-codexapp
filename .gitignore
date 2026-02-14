@@ -6,3 +6,6 @@ server/.env
 
 # builds
 web/dist
+
+# runtime artifacts
+.codex_remoteapp.pid
