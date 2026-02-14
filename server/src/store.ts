@@ -10,6 +10,7 @@ export type Session = {
   activeChatId?: string;
   createdBySessionId?: string;
   createdByCredentialId?: string;
+  isPersistent?: boolean;
 };
 
 export type CredentialRecord = {
@@ -64,6 +65,13 @@ export type StreamEvent = {
   ts: number;
 };
 
+export type TerminalSessionRecord = {
+  id: string;
+  createdAt: number;
+  cwd: string;
+  status: 'running' | 'stopped';
+};
+
 type ChatStream = {
   status: 'idle' | 'running' | 'done' | 'error';
   nextId: number;
@@ -83,12 +91,13 @@ type PersistedStore = {
 export class MemoryStore {
   private sessions = new Map<string, Session>();
   private chatsBySession = new Map<string, Map<string, Chat>>();
+  private terminalSessionsBySid = new Map<string, TerminalSessionRecord[]>();
   private streamsByChatKey = new Map<string, ChatStream>();
   private credentials = new Map<string, CredentialRecord>();
   private credentialsByOwner = new Map<string, Set<string>>();
   private credentialById = new Map<string, string>();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly persistenceVersion = 2;
+  private readonly persistenceVersion = 3;
   private persistencePath?: string;
 
   constructor(private opts: {
@@ -107,6 +116,10 @@ export class MemoryStore {
 
   private sha256Hex(s: string): string {
     return crypto.createHash('sha256').update(s).digest('hex');
+  }
+
+  private resolveExpiresAt(isPersistent: boolean) {
+    return this.now() + this.opts.sessionTtlMs;
   }
 
   private markForPersist() {
@@ -187,11 +200,9 @@ export class MemoryStore {
       const parsed = JSON.parse(raw) as Partial<PersistedStore>;
       if (!parsed || typeof parsed !== 'object') return;
 
-      const now = this.now();
       const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
       for (const s of sessions) {
         if (!this.isSessionLike(s)) continue;
-        if (s.expiresAt <= now) continue;
         this.sessions.set(s.id, s);
       }
 
@@ -276,35 +287,13 @@ export class MemoryStore {
   }
 
   sweep() {
-    const t = this.now();
     let changed = false;
-
-    for (const [id, sess] of this.sessions) {
-      if (sess.expiresAt <= t) {
-        this.sessions.delete(id);
-        changed = true;
-      }
-    }
-
-    for (const [sid, chats] of this.chatsBySession) {
-      if (!this.sessions.has(sid)) {
-        this.chatsBySession.delete(sid);
-        changed = true;
-        continue;
-      }
-      // no-op; keep chats while session lives
-      void chats;
-    }
+    const t = this.now();
 
     // Drop old/finished streams and any streams for expired sessions.
     const streamTtlMs = 15 * 60 * 1000;
     for (const [k, s] of this.streamsByChatKey) {
       const sid = k.split(':', 1)[0] || '';
-      if (!this.sessions.has(sid)) {
-        this.streamsByChatKey.delete(k);
-        changed = true;
-        continue;
-      }
       if (s.status !== 'running' && s.updatedAt + streamTtlMs <= t) {
         this.streamsByChatKey.delete(k);
         changed = true;
@@ -346,14 +335,15 @@ export class MemoryStore {
     return this.credentials.get(tokenHash) || null;
   }
 
-  createSession(opts: { createdBySessionId?: string; createdByCredentialId?: string } = {}): Session {
+  createSession(opts: { createdBySessionId?: string; createdByCredentialId?: string; isPersistent?: boolean } = {}): Session {
     const createdAt = this.now();
     const id = nanoid(24);
     const session: Session = {
       id,
       createdAt,
-      expiresAt: createdAt + this.opts.sessionTtlMs,
+      expiresAt: this.resolveExpiresAt(Boolean(opts.isPersistent)),
       activeChatId: undefined,
+      isPersistent: opts.isPersistent,
       ...opts
     };
     this.sessions.set(id, session);
@@ -362,11 +352,14 @@ export class MemoryStore {
   }
 
   // Use a stable id to make multiple devices share the same logical session (e.g. TOTP account).
-  getOrCreateSessionWithId(id: string): Session {
+  getOrCreateSessionWithId(id: string, options: { isPersistent?: boolean } = {}): Session {
     const now = this.now();
     const existing = this.sessions.get(id);
-    if (existing && existing.expiresAt > now) {
-      existing.expiresAt = now + this.opts.sessionTtlMs;
+    if (existing) {
+      existing.expiresAt = this.resolveExpiresAt(Boolean(options.isPersistent || existing.isPersistent));
+      if (typeof options.isPersistent === 'boolean') {
+        existing.isPersistent = options.isPersistent;
+      }
       this.sessions.set(id, existing);
       this.markForPersist();
       return existing;
@@ -375,8 +368,9 @@ export class MemoryStore {
     const session: Session = {
       id,
       createdAt: now,
-      expiresAt: now + this.opts.sessionTtlMs,
-      activeChatId: undefined
+      expiresAt: this.resolveExpiresAt(Boolean(options.isPersistent)),
+      activeChatId: undefined,
+      isPersistent: options.isPersistent
     };
     this.sessions.set(id, session);
     this.markForPersist();
@@ -467,34 +461,20 @@ export class MemoryStore {
     const s = this.sessions.get(id);
     if (!s) return null;
     if (s.expiresAt <= this.now()) {
-      this.sessions.delete(id);
-      this.chatsBySession.delete(id);
-      this.markForPersist();
       return null;
     }
     return s;
   }
 
   getAllSessions(): Session[] {
-    const all: Session[] = Array.from(this.sessions.values())
-      .filter((s) => s.expiresAt > this.now())
-      .map((s) => ({
-        id: s.id,
-        createdAt: s.createdAt,
-        expiresAt: s.expiresAt,
-        activeChatId: s.activeChatId,
-        createdBySessionId: s.createdBySessionId,
-        createdByCredentialId: s.createdByCredentialId
-      }));
-    const invalid = Array.from(this.sessions.keys()).filter((id) => !all.some((s) => s.id === id));
-    if (invalid.length) {
-      for (const id of invalid) {
-        this.sessions.delete(id);
-        this.chatsBySession.delete(id);
-      }
-      this.markForPersist();
-    }
-    return all;
+    return Array.from(this.sessions.values()).map((s) => ({
+      id: s.id,
+      createdAt: s.createdAt,
+      expiresAt: s.expiresAt,
+      activeChatId: s.activeChatId,
+      createdBySessionId: s.createdBySessionId,
+      createdByCredentialId: s.createdByCredentialId
+    }));
   }
 
   refreshSession(id: string): Session | null {
@@ -558,7 +538,7 @@ export class MemoryStore {
     s.status = 'running';
     s.events = [];
     s.nextId = 1;
-    s.updatedAt = this.now();
+      s.updatedAt = this.now();
     // keep listeners
     this.streamsByChatKey.set(this.chatKey(sessionId, chatId), s);
   }
@@ -711,5 +691,38 @@ export class MemoryStore {
     chat.messages[idx] = { ...chat.messages[idx], text };
     chat.updatedAt = this.now();
     this.markForPersist();
+  }
+
+  createTerminalSession(sid: string, cwd: string): TerminalSessionRecord {
+    const record: TerminalSessionRecord = {
+      id: `terminal_${nanoid(9)}`,
+      createdAt: this.now(),
+      cwd,
+      status: 'running'
+    };
+    const list = this.terminalSessionsBySid.get(sid) || [];
+    list.unshift(record);
+    while (list.length > 20) {
+      list.pop();
+    }
+    this.terminalSessionsBySid.set(sid, list);
+    return record;
+  }
+
+  listTerminalSessions(sid: string): TerminalSessionRecord[] {
+    const list = this.terminalSessionsBySid.get(sid);
+    if (!list) return [];
+    return list.map((item) => ({ ...item }));
+  }
+
+  setTerminalSessionStopped(sid: string, terminalId: string): boolean {
+    const list = this.terminalSessionsBySid.get(sid);
+    if (!list) return false;
+    const idx = list.findIndex((item) => item.id === terminalId);
+    if (idx < 0) return false;
+    const item = list[idx];
+    if (!item || item.status === 'stopped') return false;
+    list[idx] = { ...item, status: 'stopped' };
+    return true;
   }
 }

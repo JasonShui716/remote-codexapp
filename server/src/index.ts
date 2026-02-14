@@ -17,7 +17,7 @@ import pty, { type IPty } from 'node-pty';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 
 import { readEnv } from './config.js';
-import { MemoryStore, type StreamEvent } from './store.js';
+import { MemoryStore, type StreamEvent, type TerminalSessionRecord } from './store.js';
 import { SessiondClient } from './sessiondClient.js';
 
 const serverRootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -67,13 +67,6 @@ type CliHistoryStatusSnapshot = {
   timestampMs: number;
 };
 
-type TerminalSessionRecord = {
-  id: string;
-  createdAt: number;
-  cwd: string;
-  status: 'running' | 'stopped';
-};
-
 type TerminalRuntime = {
   sid: string;
   record: TerminalSessionRecord;
@@ -81,32 +74,12 @@ type TerminalRuntime = {
   clients: Set<WebSocket>;
 };
 
-const terminalSessionsBySid = new Map<string, TerminalSessionRecord[]>();
 const terminalRuntimeById = new Map<string, TerminalRuntime>();
 const terminalWss = new WebSocketServer({ noServer: true });
 
 const CLI_HISTORY_CACHE_TTL_MS = 30_000;
 const CLI_HISTORY_SCAN_FILE_LIMIT = 200;
 let cliHistorySnapshotCache: { expiresAt: number; snapshot: CliHistoryStatusSnapshot | null } | null = null;
-
-function createTerminalRecord(sid: string, cwd: string): TerminalSessionRecord {
-  const id = `terminal_${crypto.randomBytes(9).toString('base64url')}`;
-  const terminal: TerminalSessionRecord = {
-    id,
-    createdAt: Date.now(),
-    cwd,
-    status: 'running'
-  };
-  const list = terminalSessionsBySid.get(sid) || [];
-  list.unshift(terminal);
-  terminalSessionsBySid.set(sid, list);
-  while (list.length > 20) {
-    const removed = list.pop();
-    if (!removed) break;
-    disposeTerminalRuntime(removed.id);
-  }
-  return terminal;
-}
 
 function parseCookieHeader(raw: string | undefined): Record<string, string> {
   if (!raw) return {};
@@ -205,7 +178,7 @@ function bindTerminalSocket(socket: WebSocket, runtime: TerminalRuntime): void {
 }
 
 function createTerminalRuntime(sid: string, cwd: string): TerminalSessionRecord {
-  const record = createTerminalRecord(sid, cwd);
+  const record = store.createTerminalSession(sid, cwd);
   const shell = shellForTerminal();
   const child = pty.spawn(shell.command, shell.args, {
     name: 'xterm-256color',
@@ -234,6 +207,7 @@ function createTerminalRuntime(sid: string, cwd: string): TerminalSessionRecord 
 
   child.onExit(() => {
     runtime.record.status = 'stopped';
+    store.setTerminalSessionStopped(sid, runtime.record.id);
     terminalRuntimeById.delete(runtime.record.id);
     for (const client of runtime.clients) {
       try {
@@ -253,6 +227,7 @@ function disposeTerminalRuntime(terminalId: string): void {
   if (!runtime) return;
 
   runtime.record.status = 'stopped';
+  store.setTerminalSessionStopped(runtime.sid, runtime.record.id);
   terminalRuntimeById.delete(terminalId);
   for (const client of runtime.clients) {
     try {
@@ -1090,13 +1065,13 @@ function getSessionId(req: express.Request): string | null {
   return s.id;
 }
 
-function setSessionCookie(res: express.Response, sid: string) {
+function setSessionCookie(res: express.Response, sid: string, maxAgeMs: number = env.SESSION_TTL_MS) {
   res.cookie('sid', sid, {
     httpOnly: true,
     sameSite: 'lax',
     signed: true,
     secure: false, // set true behind HTTPS
-    maxAge: env.SESSION_TTL_MS
+    maxAge: maxAgeMs
   });
 }
 
@@ -1151,11 +1126,14 @@ app.get('/api/me', (req, res) => {
   // Returning 401 here creates a noisy console error on the login screen.
   // Keep /api/me as a "soft auth" probe (200 + ok:false) and reserve 401s for protected endpoints.
   if (!sid) return res.json({ ok: false });
+  const session = store.getSession(sid);
+  if (!session) return res.json({ ok: false });
+  const expiresInMs = env.SESSION_TTL_MS;
   res.json({
     ok: true,
     sessionId: sid,
     activeChatId: store.getActiveChatId(sid) || undefined,
-    expiresInMs: env.SESSION_TTL_MS
+    expiresInMs
   });
 });
 
@@ -1451,7 +1429,7 @@ app.post('/api/auth/totp/verify', (req, res) => {
     return `totp_${h}`;
   })();
   const session = store.getOrCreateSessionWithId(fixedSid);
-  setSessionCookie(res, session.id);
+  setSessionCookie(res, session.id, env.SESSION_TTL_MS);
   res.json({ ok: true, sessionId: session.id, expiresInMs: env.SESSION_TTL_MS });
 });
 
@@ -1531,7 +1509,7 @@ const listTerminalsHandler = (req: express.Request, res: express.Response) => {
   const sid = requireAuth(req, res);
   if (!sid) return;
 
-  const list = terminalSessionsBySid.get(sid) || [];
+  const list = store.listTerminalSessions(sid);
   res.json({
     ok: true,
     terminals: list.map((terminal) => ({
