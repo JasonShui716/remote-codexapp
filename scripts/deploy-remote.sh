@@ -7,7 +7,13 @@ GIT_BRANCH="${GIT_BRANCH:-}"
 APP_DIR="${APP_DIR:-/opt/remote-codexapp}"
 NGINX_PATH="${NGINX_PATH:-/codex}"
 DOMAIN="${DOMAIN:-}"
+APP_HOST="${APP_HOST:-127.0.0.1}"
 APP_PORT="${APP_PORT:-18888}"
+HTTP_PROXY_VAL="${HTTP_PROXY_VAL:-${HTTP_PROXY:-}}"
+HTTPS_PROXY_VAL="${HTTPS_PROXY_VAL:-${HTTPS_PROXY:-}}"
+SOCKS5_PROXY_VAL="${SOCKS5_PROXY_VAL:-${SOCKS5_PROXY:-}}"
+ALL_PROXY_VAL="${ALL_PROXY_VAL:-${ALL_PROXY:-}}"
+NO_PROXY_VAL="${NO_PROXY_VAL:-${NO_PROXY:-}}"
 SERVICE_NAME="${SERVICE_NAME:-codex-remoteapp}"
 APP_USER="${APP_USER:-${SUDO_USER:-$(id -un)}}"
 APP_GROUP="${APP_GROUP:-${APP_USER}}"
@@ -27,7 +33,14 @@ Quick deploy + install:
   --branch <name>    Git branch/tag (default: auto-detect remote HEAD, fallback: master)
   --domain <name>    Nginx server_name (default: prompt in interactive mode, _ for wildcard)
   --path <nginx>     Public app path, e.g. /codex (default: ${NGINX_PATH})
+  --host <addr>      Backend bind host (default: ${APP_HOST})
   --port <number>    Backend port (default: ${APP_PORT})
+  --http-proxy <url> HTTP proxy URL (persisted to server/.env)
+  --https-proxy <url> HTTPS proxy URL (persisted to server/.env)
+  --socks5-proxy <url> SOCKS5 proxy URL (persisted to server/.env, and to ALL_PROXY if unset)
+  --sock5-proxy <url>  Alias of --socks5-proxy
+  --all-proxy <url>  ALL_PROXY URL (persisted to server/.env)
+  --no-proxy <list>  NO_PROXY list, comma-separated
   --user <name>      Service run user (default: ${APP_USER})
   --skip-nginx       Skip nginx config/reload
   --skip-service     Skip systemd service install/restart
@@ -141,6 +154,35 @@ ensure_totp_secret_if_needed() {
     marker_path="$(cd "$(dirname "$env_file")" && pwd)/${marker_rel}"
   fi
   rm -f "$marker_path"
+}
+
+persist_proxy_env_if_set() {
+  local env_file="$1"
+
+  if [[ -n "${HTTP_PROXY_VAL}" ]]; then
+    ensure_env_value "$env_file" "HTTP_PROXY" "$HTTP_PROXY_VAL"
+    ensure_env_value "$env_file" "http_proxy" "$HTTP_PROXY_VAL"
+  fi
+  if [[ -n "${HTTPS_PROXY_VAL}" ]]; then
+    ensure_env_value "$env_file" "HTTPS_PROXY" "$HTTPS_PROXY_VAL"
+    ensure_env_value "$env_file" "https_proxy" "$HTTPS_PROXY_VAL"
+  fi
+  if [[ -n "${SOCKS5_PROXY_VAL}" ]]; then
+    ensure_env_value "$env_file" "SOCKS5_PROXY" "$SOCKS5_PROXY_VAL"
+    ensure_env_value "$env_file" "socks5_proxy" "$SOCKS5_PROXY_VAL"
+    if [[ -z "${ALL_PROXY_VAL}" ]]; then
+      ensure_env_value "$env_file" "ALL_PROXY" "$SOCKS5_PROXY_VAL"
+      ensure_env_value "$env_file" "all_proxy" "$SOCKS5_PROXY_VAL"
+    fi
+  fi
+  if [[ -n "${ALL_PROXY_VAL}" ]]; then
+    ensure_env_value "$env_file" "ALL_PROXY" "$ALL_PROXY_VAL"
+    ensure_env_value "$env_file" "all_proxy" "$ALL_PROXY_VAL"
+  fi
+  if [[ -n "${NO_PROXY_VAL}" ]]; then
+    ensure_env_value "$env_file" "NO_PROXY" "$NO_PROXY_VAL"
+    ensure_env_value "$env_file" "no_proxy" "$NO_PROXY_VAL"
+  fi
 }
 
 free_listeners_on_port() {
@@ -298,8 +340,32 @@ while [[ $# -gt 0 ]]; do
       NGINX_PATH="$2"
       shift 2
       ;;
+    --host)
+      APP_HOST="$2"
+      shift 2
+      ;;
     --port)
       APP_PORT="$2"
+      shift 2
+      ;;
+    --http-proxy)
+      HTTP_PROXY_VAL="$2"
+      shift 2
+      ;;
+    --https-proxy)
+      HTTPS_PROXY_VAL="$2"
+      shift 2
+      ;;
+    --socks5-proxy|--sock5-proxy)
+      SOCKS5_PROXY_VAL="$2"
+      shift 2
+      ;;
+    --all-proxy)
+      ALL_PROXY_VAL="$2"
+      shift 2
+      ;;
+    --no-proxy)
+      NO_PROXY_VAL="$2"
       shift 2
       ;;
     --user)
@@ -337,6 +403,10 @@ if [[ ! "${APP_PORT}" =~ ^[0-9]+$ ]]; then
   echo "port must be numeric: ${APP_PORT}" >&2
   exit 1
 fi
+if [[ -z "${APP_HOST}" ]]; then
+  echo "host must not be empty" >&2
+  exit 1
+fi
 
 if [[ "$SKIP_NGINX" != "1" && -z "${DOMAIN}" ]]; then
   if [[ -t 0 && -t 1 ]]; then
@@ -372,9 +442,10 @@ if [[ "$ENSURE_ENV_ONLY" == "1" ]]; then
     cp "${APP_DIR}/server/.env.example" "$ENV_FILE"
   fi
 
-  ensure_env_value "$ENV_FILE" "HOST" "127.0.0.1"
+  ensure_env_value "$ENV_FILE" "HOST" "$APP_HOST"
   ensure_env_value "$ENV_FILE" "PORT" "$APP_PORT"
   ensure_env_value "$ENV_FILE" "CODEX_CWD" "$APP_DIR"
+  persist_proxy_env_if_set "$ENV_FILE"
   ensure_totp_secret_if_needed "$ENV_FILE"
 
   log "Ensured env file: $ENV_FILE"
@@ -428,9 +499,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cp "$APP_DIR/server/.env.example" "$ENV_FILE"
 fi
 
-ensure_env_value "$ENV_FILE" "HOST" "127.0.0.1"
+ensure_env_value "$ENV_FILE" "HOST" "$APP_HOST"
 ensure_env_value "$ENV_FILE" "PORT" "$APP_PORT"
 ensure_env_value "$ENV_FILE" "CODEX_CWD" "$APP_DIR"
+persist_proxy_env_if_set "$ENV_FILE"
 ensure_totp_secret_if_needed "$ENV_FILE"
 
 log "Installing dependencies and building web bundle"

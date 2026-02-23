@@ -149,6 +149,9 @@ bash scripts/deploy-one-click.sh
 
 # or pass domain directly
 bash scripts/deploy-one-click.sh your.domain.com
+
+# no-domain deploy on custom port (direct access, no nginx)
+bash scripts/deploy-one-click.sh --host 0.0.0.0 --port 18890 --skip-nginx
 ```
 
 Common overrides:
@@ -159,6 +162,31 @@ APP_PORT=18888 \
 NGINX_PATH=/codex \
 GIT_BRANCH=master \
 bash scripts/deploy-one-click.sh your.domain.com
+```
+
+Proxy overrides (to persist into `server/.env` for systemd runtime):
+
+```bash
+bash scripts/deploy-one-click.sh \
+  --https-proxy http://127.0.0.1:7890 \
+  --http-proxy http://127.0.0.1:7890 \
+  --socks5-proxy socks5://127.0.0.1:7891
+```
+
+No-domain deploy with `deploy-remote.sh` (equivalent):
+
+```bash
+sudo SKIP_NGINX=1 APP_HOST=0.0.0.0 APP_PORT=18890 bash scripts/deploy-remote.sh
+```
+
+Direct proxy env with `deploy-remote.sh`:
+
+```bash
+sudo \
+  HTTPS_PROXY=http://127.0.0.1:7890 \
+  HTTP_PROXY=http://127.0.0.1:7890 \
+  SOCKS5_PROXY=socks5://127.0.0.1:7891 \
+  bash scripts/deploy-remote.sh --skip-nginx
 ```
 
 ### What deploy script does

@@ -147,6 +147,9 @@ bash scripts/deploy-one-click.sh
 
 # 或直接传域名
 bash scripts/deploy-one-click.sh your.domain.com
+
+# 无域名并指定端口（直连访问，不走 nginx）
+bash scripts/deploy-one-click.sh --host 0.0.0.0 --port 18890 --skip-nginx
 ```
 
 常用覆盖参数：
@@ -157,6 +160,31 @@ APP_PORT=18888 \
 NGINX_PATH=/codex \
 GIT_BRANCH=master \
 bash scripts/deploy-one-click.sh your.domain.com
+```
+
+代理覆盖参数（会持久化到 `server/.env`，供 systemd 运行时使用）：
+
+```bash
+bash scripts/deploy-one-click.sh \
+  --https-proxy http://127.0.0.1:7890 \
+  --http-proxy http://127.0.0.1:7890 \
+  --socks5-proxy socks5://127.0.0.1:7891
+```
+
+使用 `deploy-remote.sh` 的无域名等价命令：
+
+```bash
+sudo SKIP_NGINX=1 APP_HOST=0.0.0.0 APP_PORT=18890 bash scripts/deploy-remote.sh
+```
+
+使用 `deploy-remote.sh` 直接传代理环境变量：
+
+```bash
+sudo \
+  HTTPS_PROXY=http://127.0.0.1:7890 \
+  HTTP_PROXY=http://127.0.0.1:7890 \
+  SOCKS5_PROXY=socks5://127.0.0.1:7891 \
+  bash scripts/deploy-remote.sh --skip-nginx
 ```
 
 ### 部署脚本会做什么
