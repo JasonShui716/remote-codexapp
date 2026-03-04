@@ -53,6 +53,7 @@ const REASONING_VALUES: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
 const LOCKED_SANDBOX = 'danger-full-access';
 const LOCKED_APPROVAL_POLICY = 'never';
 const QUEUED_PROMPTS_KEY_PREFIX = 'codex:queuedPrompts:';
+const RESET_VIEW_MARKER_KEY_PREFIX = 'codex:resetViewMarker:';
 const INSTANCE_OPTIONS: { label: string; origin: string; path: string }[] = [
   { label: 'conknow.cc', origin: 'https://conknow.cc', path: '/codex' },
   { label: 'conknow.app', origin: 'https://www.conknow.app', path: '/codex' }
@@ -114,8 +115,31 @@ function normalizeStreamText(v: string): string {
   return v.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
+function parentDirPath(p: string): string {
+  const raw = (p || '').trim();
+  if (!raw) return '';
+
+  const trimmed = raw.replace(/[\\/]+$/, '');
+  if (!trimmed) return raw.startsWith('\\') ? '\\' : '/';
+
+  if (/^[A-Za-z]:$/.test(trimmed)) return `${trimmed}\\`;
+  if (/^\\\\[^\\/]+[\\/][^\\/]+$/.test(trimmed)) return trimmed;
+
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (idx < 0) return trimmed;
+  if (idx === 0) return trimmed[0];
+
+  const prev = trimmed.slice(0, idx);
+  if (/^[A-Za-z]:$/.test(prev)) return `${prev}\\`;
+  return prev;
+}
+
 function queuedPromptsStorageKey(sid: string, chatId: string) {
   return `${QUEUED_PROMPTS_KEY_PREFIX}${sid}:${chatId}`;
+}
+
+function resetViewMarkerStorageKey(sid: string, chatId: string) {
+  return `${RESET_VIEW_MARKER_KEY_PREFIX}${sid}:${chatId}`;
 }
 
 function loadQueuedPrompts(sid: string, chatId: string): string[] {
@@ -141,6 +165,28 @@ function saveQueuedPrompts(sid: string, chatId: string, prompts: string[]) {
       return;
     }
     window.localStorage.setItem(queuedPromptsStorageKey(sid, chatId), JSON.stringify(prompts.slice(0, 200)));
+  } catch {
+    // ignore localStorage failures
+  }
+}
+
+function loadResetViewMarker(sid: string, chatId: string): string {
+  if (!sid || !chatId) return '';
+  try {
+    return window.localStorage.getItem(resetViewMarkerStorageKey(sid, chatId)) || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveResetViewMarker(sid: string, chatId: string, marker: string) {
+  if (!sid || !chatId) return;
+  try {
+    if (!marker) {
+      window.localStorage.removeItem(resetViewMarkerStorageKey(sid, chatId));
+      return;
+    }
+    window.localStorage.setItem(resetViewMarkerStorageKey(sid, chatId), marker);
   } catch {
     // ignore localStorage failures
   }
@@ -487,6 +533,9 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
     chatId: props.chatId,
     prompts: loadQueuedPrompts(props.sessionId, props.chatId)
   }));
+  const [resetViewMarker, setResetViewMarker] = useState<string>(() =>
+    loadResetViewMarker(props.sessionId, props.chatId)
+  );
   // Keep the rest of the component using the old `queuedPrompts` / `setQueuedPrompts` shape.
   const queuedPrompts =
     queueState.sid === props.sessionId && queueState.chatId === props.chatId ? queueState.prompts : [];
@@ -510,6 +559,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
   const terminalListRefreshSeqRef = useRef(0);
   const historyLoadRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(null);
   const historyLoadingRef = useRef(false);
+  const snapToBottomOnEnterRef = useRef<boolean>(true);
 
   const pushActivity = (item: Omit<ActivityItem, 'ts'> & { ts?: number }) => {
     const ts = typeof item.ts === 'number' ? item.ts : nowTs();
@@ -661,6 +711,32 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
     }
   };
 
+  const cloneCurrentChat = async () => {
+    try {
+      setErr(null);
+      const newChatId = await createChat();
+      const patch: {
+        model?: string | null;
+        reasoningEffort?: ReasoningEffort | null;
+        cwd?: string | null;
+      } = {};
+
+      const model = (settings.model || '').trim();
+      const cwd = (settings.cwd || '').trim();
+      if (model) patch.model = model;
+      if (settings.reasoningEffort) patch.reasoningEffort = settings.reasoningEffort;
+      if (cwd) patch.cwd = cwd;
+
+      if (Object.keys(patch).length > 0) {
+        await updateChatSettings(newChatId, patch);
+      }
+      void refreshChatList();
+      selectChat(newChatId);
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    }
+  };
+
   const openTerminal = (terminal: TerminalSession) => {
     setActiveTerminal(terminal);
     setMobileChatListOpen(false);
@@ -669,6 +745,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
 
   const selectChat = (chatId: string) => {
     setActiveTerminal(null);
+    snapToBottomOnEnterRef.current = true;
     if (chatId !== props.chatId) {
       void props.onSwitchChat(chatId);
     }
@@ -936,6 +1013,8 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
       setStreamErrorCount(0);
       setStreamErrorAt(0);
       startTurnRef.current = false;
+      snapToBottomOnEnterRef.current = true;
+      setResetViewMarker(loadResetViewMarker(props.sessionId, props.chatId));
       const chat = await getChat(props.chatId);
       if (cancelled) return;
       setMessages(chat.messages);
@@ -986,10 +1065,12 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
       stopPolling();
       closeStream();
     };
-  }, [props.chatId]);
+  }, [props.chatId, props.sessionId]);
 
-  const renderStart = Math.max(0, messages.length - renderCount);
-  const visibleMessages = messages.slice(renderStart);
+  const resetMarkerIndex = resetViewMarker ? messages.findIndex((m) => m.id === resetViewMarker) : -1;
+  const displayMessages = resetMarkerIndex >= 0 ? messages.slice(resetMarkerIndex + 1) : messages;
+  const renderStart = Math.max(0, displayMessages.length - renderCount);
+  const visibleMessages = displayMessages.slice(renderStart);
   const nowForUi = uiNow || Date.now();
 
   const onChatScroll = () => {
@@ -1003,7 +1084,7 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
 
     historyLoadingRef.current = true;
     historyLoadRef.current = { prevScrollHeight: el.scrollHeight, prevScrollTop: el.scrollTop };
-    setRenderCount((c) => Math.min(messages.length, c + LOAD_MORE_COUNT));
+    setRenderCount((c) => Math.min(displayMessages.length, c + LOAD_MORE_COUNT));
   };
 
   useLayoutEffect(() => {
@@ -1033,8 +1114,17 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
   }, [controlsOpen]);
 
   useEffect(() => {
+    if (snapToBottomOnEnterRef.current) return;
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length]);
+  }, [visibleMessages.length]);
+
+  useLayoutEffect(() => {
+    if (!snapToBottomOnEnterRef.current) return;
+    const el = chatRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    snapToBottomOnEnterRef.current = false;
+  }, [props.chatId, visibleMessages.length, renderCount]);
 
   const applySettings = async (patch: any, local: Partial<typeof settings>, statusText?: string) => {
     if (patch && typeof patch === 'object') {
@@ -1311,6 +1401,8 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
       ? selectedModelOption.reasoningEfforts
       : defaults?.reasoningEffortOptions || []
   ).filter((v, i, arr) => arr.indexOf(v) === i);
+  const parentCwdPath = parentDirPath(cwdPath);
+  const canGoParent = Boolean(parentCwdPath) && parentCwdPath !== cwdPath;
 
   return (
     <div className="page page-chat">
@@ -1394,6 +1486,13 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
               }}
             >
               New
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              disabled={chatListBusy}
+              onClick={() => void cloneCurrentChat()}
+            >
+              Clone
             </button>
             <button
               className="btn btn-secondary btn-sm"
@@ -1670,7 +1769,16 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
               disabled={busy}
               onClick={async () => {
                 try {
+                  const latestServerMsg = [...messages].reverse().find((m) => !m.id.startsWith('local-'));
+                  const marker = latestServerMsg?.id || resetViewMarker;
                   await resetChatSession(props.chatId);
+                  setResetViewMarker(marker);
+                  saveResetViewMarker(props.sessionId, props.chatId, marker);
+                  setMessages([]);
+                  setRenderCount(INITIAL_RENDER_COUNT);
+                  historyLoadRef.current = null;
+                  historyLoadingRef.current = false;
+                  snapToBottomOnEnterRef.current = true;
                   addSystem('OK: reset chat codex session');
                 } catch (e: any) {
                   setErr(String(e?.message || e));
@@ -1732,6 +1840,16 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
             <div className="cwdpicker-path">{cwdPath || '(unknown)'}</div>
             {cwdPickerErr ? <div className="status">{cwdPickerErr}</div> : null}
             <div className="cwdpicker-roots">
+              <button
+                className="btn btn-secondary btn-sm"
+                disabled={busy || !canGoParent}
+                onClick={() => {
+                  if (!canGoParent) return;
+                  void navCwd(parentCwdPath);
+                }}
+              >
+                上一级
+              </button>
               {cwdRoots.map((r) => (
                 <button key={r.path} className="btn btn-secondary btn-sm" onClick={() => void navCwd(r.path)}>
                   {r.label}
@@ -1758,6 +1876,12 @@ function Chat(props: { chatId: string; sessionId: string; onSwitchChat: (chatId:
               </button>
             </div>
             <div className="cwdpicker-list">
+              {canGoParent ? (
+                <button className="cwdpicker-item" onClick={() => void navCwd(parentCwdPath)}>
+                  <span className="cwdpicker-icon">up</span>
+                  <span className="cwdpicker-name">..</span>
+                </button>
+              ) : null}
               {cwdEntries.filter((e) => e.type === 'dir').map((e) => (
                 <button
                   key={e.name}
